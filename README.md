@@ -22,6 +22,10 @@ South, and pick the level of your partner and of each rival, from a random playe
 player `ClaudePlayerNeural`. It keeps your rating, your game history and your record against each
 level on the device.
 
+The ASP.NET Core web API for playing South against three bots is documented in
+[src/Belot.WebApi/README.md](src/Belot.WebApi/README.md); it includes local run and Render Docker
+deployment instructions.
+
 ## The AI players
 
 - `SmartPlayer`: hand-written rules, improved change by change and measured in ELO.
