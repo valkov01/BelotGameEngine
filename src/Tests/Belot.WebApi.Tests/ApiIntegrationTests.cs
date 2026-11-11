@@ -49,7 +49,7 @@ public sealed class ApiIntegrationTests : IDisposable
         using var preflight = new HttpRequestMessage(HttpMethod.Options, "/api/games");
         preflight.Headers.Add("Origin", "https://preview--belote-bridge-battle.lovable.app");
         preflight.Headers.Add("Access-Control-Request-Method", "POST");
-        preflight.Headers.Add("Access-Control-Request-Headers", "content-type");
+        preflight.Headers.Add("Access-Control-Request-Headers", "content-type, x-belot-debug-key");
 
         using var response = await this.client.SendAsync(preflight);
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
@@ -62,6 +62,7 @@ public sealed class ApiIntegrationTests : IDisposable
         Assert.Contains("OPTIONS", allowedMethods, StringComparison.OrdinalIgnoreCase);
         var allowedHeaders = response.Headers.GetValues("Access-Control-Allow-Headers").Single();
         Assert.Contains("content-type", allowedHeaders, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("x-belot-debug-key", allowedHeaders, StringComparison.OrdinalIgnoreCase);
 
         using var allowedRequest = new HttpRequestMessage(HttpMethod.Get, "/api/health");
         allowedRequest.Headers.Add("Origin", "https://preview--belote-bridge-battle.lovable.app");
@@ -92,6 +93,7 @@ public sealed class ApiIntegrationTests : IDisposable
         Assert.True(games.TryGetProperty("post", out _));
         Assert.True(paths.TryGetProperty("/api/games/{gameId}", out var game));
         Assert.True(game.TryGetProperty("get", out _));
+        Assert.False(paths.TryGetProperty("/api/games/{gameId}/debug/hands", out _));
         Assert.True(paths.TryGetProperty("/api/games/{gameId}/actions", out var actions));
         Assert.True(actions.TryGetProperty("post", out _));
 
@@ -159,6 +161,98 @@ public sealed class ApiIntegrationTests : IDisposable
         Assert.Contains(played.Events, gameEvent => gameEvent.Type == "card" && gameEvent.Seat != "South" && gameEvent.Automatic == true);
         Assert.Contains(played.Events, gameEvent => gameEvent.Type == "trick");
         Assert.Equal(played.Events.Select(gameEvent => gameEvent.Sequence).Order(), played.Events.Select(gameEvent => gameEvent.Sequence));
+    }
+
+    [Fact]
+    public async Task DebugHandsEndpointIsUnavailableWhenDisabled()
+    {
+        var state = await this.CreateGameAsync(new CreateGameRequest());
+
+        using var response = await this.client.GetAsync($"/api/games/{state.GameId}/debug/hands");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DebugHandsRequireAKeyReturnLiveHandsAndDoNotChangeGameplay()
+    {
+        const string debugAccessKey = "integration-test-debug-key";
+        using var enabledFactory = new ApiFactory(revealHandsEnabled: true, debugAccessKey: debugAccessKey);
+        using var enabledClient = enabledFactory.CreateClient();
+        using var createResponse = await enabledClient.PostAsJsonAsync("/api/games", new CreateGameRequest());
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        var state = (await createResponse.Content.ReadFromJsonAsync<GameStateDto>())!;
+        var gamePath = $"/api/games/{state.GameId}";
+        var debugPath = $"{gamePath}/debug/hands";
+
+        using var missingKeyResponse = await enabledClient.GetAsync(debugPath);
+        Assert.Equal(HttpStatusCode.Unauthorized, missingKeyResponse.StatusCode);
+
+        using var invalidKeyRequest = new HttpRequestMessage(HttpMethod.Get, debugPath);
+        invalidKeyRequest.Headers.Add("X-Belot-Debug-Key", "incorrect-key");
+        using var invalidKeyResponse = await enabledClient.SendAsync(invalidKeyRequest);
+        Assert.Equal(HttpStatusCode.Unauthorized, invalidKeyResponse.StatusCode);
+
+        using var beforeResponse = await enabledClient.GetAsync(gamePath);
+        var beforeJson = await beforeResponse.Content.ReadAsStringAsync();
+        using var debugRequest = new HttpRequestMessage(HttpMethod.Get, debugPath);
+        debugRequest.Headers.Add("X-Belot-Debug-Key", debugAccessKey);
+        using var debugResponse = await enabledClient.SendAsync(debugRequest);
+        Assert.Equal(HttpStatusCode.OK, debugResponse.StatusCode);
+        var hands = (await debugResponse.Content.ReadFromJsonAsync<DebugHandsDto>())!;
+
+        Assert.Equal(state.GameId, hands.GameId);
+        Assert.Equal(new[] { "South", "North", "East", "West" }, hands.Hands.Select(hand => hand.Seat));
+        Assert.Equal(new[] { "Human", "Partner bot", "Opponent bot", "Opponent bot" }, hands.Hands.Select(hand => hand.Role));
+        Assert.All(hands.Hands, hand => Assert.Equal(5, hand.Cards.Count));
+        Assert.Equal(20, hands.Hands.SelectMany(hand => hand.Cards).Distinct().Count());
+        Assert.Equal(state.Hand.OrderBy(card => card.Suit).ThenBy(card => card.Type), hands.Hands[0].Cards.OrderBy(card => card.Suit).ThenBy(card => card.Type));
+
+        var stateOnlyJson = JsonSerializer.Serialize(state, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        foreach (var hiddenCard in hands.Hands.Skip(1).SelectMany(hand => hand.Cards))
+        {
+            Assert.DoesNotContain(JsonSerializer.Serialize(hiddenCard, new JsonSerializerOptions(JsonSerializerDefaults.Web)), stateOnlyJson, StringComparison.Ordinal);
+            Assert.DoesNotContain(JsonSerializer.Serialize(hiddenCard, new JsonSerializerOptions(JsonSerializerDefaults.Web)), beforeJson, StringComparison.Ordinal);
+        }
+
+        using var repeatedDebugRequest = new HttpRequestMessage(HttpMethod.Get, debugPath);
+        repeatedDebugRequest.Headers.Add("X-Belot-Debug-Key", debugAccessKey);
+        using var repeatedDebugResponse = await enabledClient.SendAsync(repeatedDebugRequest);
+        Assert.Equal(JsonSerializer.Serialize(hands, new JsonSerializerOptions(JsonSerializerDefaults.Web)), await repeatedDebugResponse.Content.ReadAsStringAsync());
+        using var afterReadResponse = await enabledClient.GetAsync(gamePath);
+        Assert.Equal(beforeJson, await afterReadResponse.Content.ReadAsStringAsync());
+
+        state = await AdvanceToPlayCardAsync(enabledClient, state);
+        var handsBeforePlay = await GetDebugHandsAsync(enabledClient, debugPath, debugAccessKey);
+        var cardToPlay = state.PlayableCards[0];
+        using var playResponse = await enabledClient.PostAsJsonAsync(
+            $"{gamePath}/actions",
+            new { card = cardToPlay, belote = state.BeloteCards.Contains(cardToPlay) });
+        Assert.Equal(HttpStatusCode.OK, playResponse.StatusCode);
+        var playResult = (await playResponse.Content.ReadFromJsonAsync<GameActionResponse>())!;
+        var playedCards = playResult.Events
+            .Where(gameEvent => gameEvent.Type == "card")
+            .Select(gameEvent => (gameEvent.Seat, gameEvent.Card))
+            .ToArray();
+        Assert.NotEmpty(playedCards);
+
+        var handsAfterPlay = await GetDebugHandsAsync(enabledClient, debugPath, debugAccessKey);
+        foreach (var seatHand in handsBeforePlay.Hands)
+        {
+            var cardsPlayedBySeat = playedCards
+                .Where(played => played.Seat == seatHand.Seat)
+                .Select(played => played.Card)
+                .ToHashSet();
+            var expectedCards = seatHand.Cards.Where(card => !cardsPlayedBySeat.Contains(card));
+            var actualCards = handsAfterPlay.Hands.Single(hand => hand.Seat == seatHand.Seat).Cards;
+            Assert.Equal(expectedCards.OrderBy(card => card.Suit).ThenBy(card => card.Type), actualCards.OrderBy(card => card.Suit).ThenBy(card => card.Type));
+        }
+
+        var actionJson = JsonSerializer.Serialize(playResult, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        foreach (var hiddenCard in handsAfterPlay.Hands.Skip(1).SelectMany(hand => hand.Cards))
+        {
+            Assert.DoesNotContain(JsonSerializer.Serialize(hiddenCard, new JsonSerializerOptions(JsonSerializerDefaults.Web)), actionJson, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -261,6 +355,38 @@ public sealed class ApiIntegrationTests : IDisposable
         Assert.Equal(states[0].GameId, responses[0].State.GameId);
         Assert.Equal(states[1].GameId, responses[1].State.GameId);
         Assert.All(responses, response => Assert.Equal("South", response.State.ToMove));
+    }
+
+    private static async Task<GameStateDto> AdvanceToPlayCardAsync(HttpClient client, GameStateDto state)
+    {
+        for (var index = 0; index < 100 && state.Decision != "PlayCard"; index++)
+        {
+            object action = state.Decision switch
+            {
+                "Bid" => new { bid = state.AvailableBids[0] },
+                "Announce" => new
+                {
+                    announces = state.AvailableAnnounces.Select(announce => new { type = announce.Type, card = announce.Card }).ToArray(),
+                },
+                _ => throw new InvalidOperationException($"Unexpected decision: {state.Decision}."),
+            };
+
+            using var response = await client.PostAsJsonAsync($"/api/games/{state.GameId}/actions", action);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            state = (await response.Content.ReadFromJsonAsync<GameActionResponse>())!.State;
+        }
+
+        Assert.Equal("PlayCard", state.Decision);
+        return state;
+    }
+
+    private static async Task<DebugHandsDto> GetDebugHandsAsync(HttpClient client, string path, string key)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, path);
+        request.Headers.Add("X-Belot-Debug-Key", key);
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<DebugHandsDto>())!;
     }
 
     private async Task<GameStateDto> CreateGameAsync(CreateGameRequest request)

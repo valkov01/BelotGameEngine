@@ -157,6 +157,39 @@ internal sealed class GameService
         }
     }
 
+    public async Task<DebugHandsDto?> GetDebugHandsAsync(string gameId, CancellationToken cancellationToken)
+    {
+        var game = this.store.Find(gameId);
+        if (game is null)
+        {
+            return null;
+        }
+
+        await game.Gate.WaitAsync(cancellationToken);
+        try
+        {
+            var seats = new[]
+            {
+                (Position: PlayerPosition.South, Role: "Human"),
+                (Position: PlayerPosition.North, Role: "Partner bot"),
+                (Position: PlayerPosition.East, Role: "Opponent bot"),
+                (Position: PlayerPosition.West, Role: "Opponent bot"),
+            };
+            var hands = seats
+                .Select(seat => new DebugHandDto(
+                    seat.Position.ToString(),
+                    seat.Role,
+                    game.Match.GetView(seat.Position).Hand.Select(CardDto.From).ToArray()))
+                .ToArray();
+
+            return new DebugHandsDto(game.GameId, hands);
+        }
+        finally
+        {
+            game.Gate.Release();
+        }
+    }
+
     public async Task<GameActionResult> ActAsync(string gameId, GameActionRequest request, CancellationToken cancellationToken)
     {
         var game = this.store.Find(gameId);

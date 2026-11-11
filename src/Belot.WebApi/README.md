@@ -2,7 +2,7 @@
 
 An ASP.NET Core API for one human playing South against the repository's original bots. It uses
 `Belot.Engine.GameMechanics.BelotMatch` for all game state and rules, and keeps each bot's original
-decision implementation. The API does not expose the internal match or hidden hands.
+decision implementation. Normal gameplay responses expose only South's hand and public game data.
 
 ## Run locally
 
@@ -25,6 +25,8 @@ it listens on `http://localhost:5266`.
   `beginner`, `skilled`, `expert` or `master`; all default to `skilled`.
 - `GET /api/games/{gameId}` — current South-seat view.
 - `POST /api/games/{gameId}/actions` — submits South's current bid, declarations or card.
+- `GET /api/games/{gameId}/debug/hands` — developer-only live hands, disabled by default and
+  omitted from the public OpenAPI document. Requires `X-Belot-Debug-Key`.
 - `GET /openapi/v1.json` — public OpenAPI 3.0 specification for the endpoints and JSON contract.
 
 The profiles match the app: Random is `RandomPlayer`, Beginner `DummyPlayer`, Skilled
@@ -101,6 +103,48 @@ The public API contract is available at `https://belotgameengine.onrender.com/op
 The global IP-based rate limit defaults to 120 requests per 60 seconds; tune it with
 `RateLimit__PermitLimit` and `RateLimit__WindowSeconds`. `Games__MaximumActive` limits stored
 games (default 500).
+
+### Developer-only hand inspection
+
+The debug route is unavailable unless both settings are configured. For temporary bot testing in
+Render, set:
+
+- `Debug__RevealHandsEnabled=true`
+- `Debug__AccessKey` to a long, randomly generated secret stored only in Render's environment
+  settings (never in source control or frontend code)
+
+Disable the feature again by setting `Debug__RevealHandsEnabled=false` or removing the key. An
+enabled endpoint rejects requests without the exact key. It returns:
+
+```json
+{
+  "gameId": "game-id",
+  "hands": [
+    { "seat": "South", "role": "Human", "cards": [{ "suit": "Club", "type": "Ace" }] },
+    { "seat": "North", "role": "Partner bot", "cards": [{ "suit": "Heart", "type": "Seven" }] },
+    { "seat": "East", "role": "Opponent bot", "cards": [{ "suit": "Spade", "type": "Queen" }] },
+    { "seat": "West", "role": "Opponent bot", "cards": [{ "suit": "Diamond", "type": "Ten" }] }
+  ]
+}
+```
+
+Each `cards` array contains all cards currently held by that seat, in the same format as normal
+game responses. The example is abbreviated; real hands contain the current cards remaining. Reads
+are synchronized with actions and do not change game state. Only the already configured trusted
+origins receive the CORS permission for this header.
+
+An authenticated developer request can be made from a secure terminal:
+
+```sh
+curl -s 'https://belotgameengine.onrender.com/api/games/<gameId>/debug/hands' \
+  -H 'X-Belot-Debug-Key: <your-secret>'
+```
+
+Lovable should call this through a server-side function or private development proxy that stores
+the Render key in its server environment, then return the result only to authorized testers.
+Do not place the key in browser JavaScript, frontend environment variables, or local storage:
+browser-held keys are visible to users and defeat the developer-only protection. CORS is not an
+authorization boundary; the server-side key check is.
 
 Build and run the root Dockerfile:
 

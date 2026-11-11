@@ -128,6 +128,10 @@ public sealed record PublicGameEventDto(
 
 public sealed record GameActionResponse(GameStateDto State, IReadOnlyList<PublicGameEventDto> Events);
 
+public sealed record DebugHandDto(string Seat, string Role, IReadOnlyList<CardDto> Cards);
+
+public sealed record DebugHandsDto(string GameId, IReadOnlyList<DebugHandDto> Hands);
+
 internal static class ApiMapper
 {
     public static GameStateDto ToState(string gameId, IReadOnlyDictionary<string, string> bots, BelotSeatView view)

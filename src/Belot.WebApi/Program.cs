@@ -1,4 +1,6 @@
-﻿using System.Text.Json.Serialization;
+﻿using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json.Serialization;
 using System.Threading.RateLimiting;
 
 using Belot.WebApi;
@@ -22,7 +24,7 @@ builder.Services.AddCors(options =>
             policy
                 .WithOrigins(origins)
                 .WithMethods("GET", "POST", "OPTIONS")
-                .WithHeaders("Content-Type", "Accept");
+                .WithHeaders("Content-Type", "Accept", "X-Belot-Debug-Key");
         }
     });
 });
@@ -44,6 +46,7 @@ builder.Services.AddRateLimiter(options =>
 
 builder.Services.AddSingleton<GameStore>();
 builder.Services.AddSingleton<GameService>();
+builder.Services.AddSingleton<DebugHandsAccess>();
 
 var app = builder.Build();
 
@@ -71,6 +74,27 @@ app.MapGet("/api/games/{gameId}", async (string gameId, GameService games, Cance
     return result is null ? Results.NotFound(new ApiError("Game not found.")) : Results.Ok(result);
 });
 
+app.MapGet("/api/games/{gameId}/debug/hands", async (
+    string gameId,
+    HttpContext context,
+    GameService games,
+    DebugHandsAccess debugAccess,
+    CancellationToken cancellationToken) =>
+{
+    if (!debugAccess.IsEnabled)
+    {
+        return Results.NotFound(new ApiError("Not found."));
+    }
+
+    if (!debugAccess.IsAuthorized(context.Request.Headers["X-Belot-Debug-Key"].ToString()))
+    {
+        return Results.Unauthorized();
+    }
+
+    var result = await games.GetDebugHandsAsync(gameId, cancellationToken);
+    return result is null ? Results.NotFound(new ApiError("Game not found.")) : Results.Ok(result);
+});
+
 app.MapPost("/api/games/{gameId}/actions", async (string gameId, GameActionRequest request, GameService games, CancellationToken cancellationToken) =>
 {
     var result = await games.ActAsync(gameId, request, cancellationToken);
@@ -87,4 +111,39 @@ app.Run();
 
 public partial class Program
 {
+}
+
+internal sealed class DebugHandsAccess
+{
+    private readonly bool enabled;
+
+    private readonly byte[]? accessKeyHash;
+
+    public DebugHandsAccess(IConfiguration configuration)
+    {
+        this.enabled = configuration.GetValue("Debug:RevealHandsEnabled", false);
+        var accessKey = configuration["Debug:AccessKey"];
+        this.accessKeyHash = string.IsNullOrEmpty(accessKey)
+            ? null
+            : SHA256.HashData(Encoding.UTF8.GetBytes(accessKey));
+    }
+
+    public bool IsEnabled => this.enabled && this.accessKeyHash is not null;
+
+    public bool IsAuthorized(string? providedKey)
+    {
+        if (!this.IsEnabled || string.IsNullOrEmpty(providedKey))
+        {
+            return false;
+        }
+
+        var configuredHash = this.accessKeyHash;
+        if (configuredHash is null)
+        {
+            return false;
+        }
+
+        var providedHash = SHA256.HashData(Encoding.UTF8.GetBytes(providedKey));
+        return CryptographicOperations.FixedTimeEquals(configuredHash, providedHash);
+    }
 }
