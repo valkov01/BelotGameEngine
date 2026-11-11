@@ -19,7 +19,10 @@ builder.Services.AddCors(options =>
     {
         if (origins.Length > 0)
         {
-            policy.WithOrigins(origins).AllowAnyHeader().AllowAnyMethod();
+            policy
+                .WithOrigins(origins)
+                .WithMethods("GET", "POST", "OPTIONS")
+                .WithHeaders("Content-Type", "Accept");
         }
     });
 });
@@ -44,8 +47,10 @@ builder.Services.AddSingleton<GameService>();
 
 var app = builder.Build();
 
+app.UseRouting();
 app.UseCors();
 app.UseRateLimiter();
+app.UseStaticFiles();
 
 app.MapGet("/api/health", () => Results.Ok(new HealthResponse("ok")));
 app.MapGet("/api/bots", () => Results.Ok(BotProfiles.All));

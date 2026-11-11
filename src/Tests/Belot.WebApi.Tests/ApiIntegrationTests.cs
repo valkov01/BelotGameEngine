@@ -44,6 +44,66 @@ public sealed class ApiIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task CorsAllowsConfiguredOriginsAndExpectedPreflightHeadersOnly()
+    {
+        using var preflight = new HttpRequestMessage(HttpMethod.Options, "/api/games");
+        preflight.Headers.Add("Origin", "https://lovable.example");
+        preflight.Headers.Add("Access-Control-Request-Method", "POST");
+        preflight.Headers.Add("Access-Control-Request-Headers", "content-type,accept");
+
+        using var response = await this.client.SendAsync(preflight);
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal("https://lovable.example", response.Headers.GetValues("Access-Control-Allow-Origin").Single());
+        var allowedMethods = response.Headers.GetValues("Access-Control-Allow-Methods").Single();
+        Assert.Contains("GET", allowedMethods, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("POST", allowedMethods, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("OPTIONS", allowedMethods, StringComparison.OrdinalIgnoreCase);
+        var allowedHeaders = response.Headers.GetValues("Access-Control-Allow-Headers").Single();
+        Assert.Contains("content-type", allowedHeaders, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("accept", allowedHeaders, StringComparison.OrdinalIgnoreCase);
+
+        using var allowedRequest = new HttpRequestMessage(HttpMethod.Get, "/api/health");
+        allowedRequest.Headers.Add("Origin", "https://lovable.example");
+        using var allowedResponse = await this.client.SendAsync(allowedRequest);
+        Assert.Equal("https://lovable.example", allowedResponse.Headers.GetValues("Access-Control-Allow-Origin").Single());
+
+        using var deniedRequest = new HttpRequestMessage(HttpMethod.Get, "/api/health");
+        deniedRequest.Headers.Add("Origin", "https://untrusted.example");
+        using var deniedResponse = await this.client.SendAsync(deniedRequest);
+        Assert.False(deniedResponse.Headers.Contains("Access-Control-Allow-Origin"));
+    }
+
+    [Fact]
+    public async Task OpenApiDocumentIsPublicAndDescribesTheGameplayContract()
+    {
+        using var response = await this.client.GetAsync("/openapi/v1.json");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+
+        using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+        var root = document.RootElement;
+        var paths = root.GetProperty("paths");
+        Assert.True(paths.TryGetProperty("/api/health", out _));
+        Assert.True(paths.TryGetProperty("/api/bots", out _));
+        Assert.True(paths.TryGetProperty("/api/games", out var games));
+        Assert.True(games.TryGetProperty("post", out _));
+        Assert.True(paths.TryGetProperty("/api/games/{gameId}", out var game));
+        Assert.True(game.TryGetProperty("get", out _));
+        Assert.True(paths.TryGetProperty("/api/games/{gameId}/actions", out var actions));
+        Assert.True(actions.TryGetProperty("post", out _));
+
+        var schemas = root.GetProperty("components").GetProperty("schemas");
+        Assert.Equal(
+            new[] { "Club", "Diamond", "Heart", "Spade" },
+            schemas.GetProperty("Card").GetProperty("properties").GetProperty("suit").GetProperty("enum").EnumerateArray().Select(value => value.GetString()));
+        Assert.Equal(
+            new[] { "Seven", "Eight", "Nine", "Ten", "Jack", "Queen", "King", "Ace" },
+            schemas.GetProperty("Card").GetProperty("properties").GetProperty("type").GetProperty("enum").EnumerateArray().Select(value => value.GetString()));
+        Assert.True(schemas.TryGetProperty("ApiError", out _));
+        Assert.True(schemas.TryGetProperty("GameActionResponse", out _));
+    }
+
+    [Fact]
     public async Task EveryOriginalDifficultyExecutesABotDecision()
     {
         foreach (var level in new[] { "random", "beginner", "skilled", "expert", "master" })

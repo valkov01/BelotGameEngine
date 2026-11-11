@@ -1,0 +1,431 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Belot Game API",
+    "version": "v1",
+    "description": "Play a Belot match as South against the original BelotGameEngine bots. All JSON property names are camelCase."
+  },
+  "servers": [
+    {
+      "url": "https://belotgameengine.onrender.com"
+    }
+  ],
+  "paths": {
+    "/api/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Check API health",
+        "responses": {
+          "200": {
+            "description": "API is available.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" },
+                "example": { "status": "ok" }
+              }
+            }
+          },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/bots": {
+      "get": {
+        "operationId": "getBots",
+        "summary": "List supported bot profiles",
+        "responses": {
+          "200": {
+            "description": "Available profiles. These are the existing original bot implementations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/BotProfile" }
+                },
+                "example": [
+                  { "id": "random", "name": "Random" },
+                  { "id": "beginner", "name": "Beginner" },
+                  { "id": "skilled", "name": "Skilled" },
+                  { "id": "expert", "name": "Expert" },
+                  { "id": "master", "name": "Master" }
+                ]
+              }
+            }
+          },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/games": {
+      "post": {
+        "operationId": "createGame",
+        "summary": "Start a match",
+        "description": "Creates a match with the human at South. Each bot profile defaults to skilled. The response is the initial South-visible state; the gameId acts as a bearer token.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateGameRequest" },
+              "example": { "north": "beginner", "east": "expert", "west": "master" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Match created. The Location header identifies the game resource.",
+            "headers": {
+              "Location": {
+                "schema": { "type": "string" },
+                "description": "Relative URL of the created game."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/GameState" }
+              }
+            }
+          },
+          "400": {
+            "description": "One or more bot profile IDs are not supported.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" },
+                "example": { "error": "north, east and west must be valid bot profile ids." }
+              }
+            }
+          },
+          "503": { "$ref": "#/components/responses/Unavailable" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/games/{gameId}": {
+      "parameters": [
+        {
+          "name": "gameId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" },
+          "description": "Opaque game ID returned by POST /api/games."
+        }
+      ],
+      "get": {
+        "operationId": "getGame",
+        "summary": "Get the current game state",
+        "description": "Returns only the South player's legal, visible information; opponents' hands are never included.",
+        "responses": {
+          "200": {
+            "description": "Current South-visible state.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/GameState" }
+              }
+            }
+          },
+          "404": {
+            "description": "No active game has this ID.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" },
+                "example": { "error": "Game not found." }
+              }
+            }
+          },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/games/{gameId}/actions": {
+      "parameters": [
+        {
+          "name": "gameId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" },
+          "description": "Opaque game ID returned by POST /api/games."
+        }
+      ],
+      "post": {
+        "operationId": "submitGameAction",
+        "summary": "Submit South's current action",
+        "description": "Send the field matching the current state's decision. Use availableBids, availableAnnounces, playableCards and beloteCards from that state. Successful actions run all intervening bot moves and return the updated state plus ordered public events.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/GameActionRequest" },
+              "examples": {
+                "bid": { "value": { "bid": "Clubs" } },
+                "pass": { "value": { "bid": "Pass" } },
+                "declare": {
+                  "value": {
+                    "announces": [
+                      { "type": "SequenceOf3", "card": { "suit": "Heart", "type": "Jack" } }
+                    ]
+                  }
+                },
+                "declareNone": { "value": { "announces": [] } },
+                "playCard": {
+                  "value": {
+                    "card": { "suit": "Heart", "type": "Ace" },
+                    "belote": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Action accepted; bots have acted until South must decide again or the match ends.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/GameActionResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or unavailable action for the current decision.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" },
+                "examples": {
+                  "invalidAction": { "value": { "error": "bid must be one available bid name." } },
+                  "invalidCard": { "value": { "error": "card must contain a valid suit and type." } }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No active game has this ID.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" },
+                "example": { "error": "Game not found." }
+              }
+            }
+          },
+          "409": {
+            "description": "The match is finished or South is not currently to move.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" },
+                "examples": {
+                  "finished": { "value": { "error": "The match is finished." } },
+                  "notSouthTurn": { "value": { "error": "The human seat is not currently to move." } }
+                }
+              }
+            }
+          },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    }
+  },
+  "components": {
+    "responses": {
+      "RateLimited": {
+        "description": "The per-IP request limit has been reached. The API returns an empty 429 response."
+      },
+      "Unavailable": {
+        "description": "The API cannot create a game because its active-game capacity has been reached. The response has no body."
+      }
+    },
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": { "type": "string", "example": "ok" }
+        }
+      },
+      "BotProfile": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string", "enum": ["random", "beginner", "skilled", "expert", "master"] },
+          "name": { "type": "string", "example": "Skilled" }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" }
+        }
+      },
+      "CreateGameRequest": {
+        "type": "object",
+        "properties": {
+          "north": { "type": "string", "enum": ["random", "beginner", "skilled", "expert", "master"], "default": "skilled" },
+          "east": { "type": "string", "enum": ["random", "beginner", "skilled", "expert", "master"], "default": "skilled" },
+          "west": { "type": "string", "enum": ["random", "beginner", "skilled", "expert", "master"], "default": "skilled" }
+        }
+      },
+      "GameActionRequest": {
+        "type": "object",
+        "description": "The DTO accepts these optional fields; semantically supply the field appropriate to the current decision. A bid may be Pass, Clubs, Diamonds, Hearts, Spades, NoTrumps, AllTrumps, Double or ReDouble, subject to availableBids.",
+        "properties": {
+          "bid": {
+            "type": "string",
+            "enum": ["Pass", "Clubs", "Diamonds", "Hearts", "Spades", "NoTrumps", "AllTrumps", "Double", "ReDouble"],
+            "description": "One available bid. For a Bid decision, send for example {\"bid\":\"Clubs\"}."
+          },
+          "announces": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/AnnounceRequest" },
+            "description": "For an Announce decision, send selected offered declarations, or [] to declare none."
+          },
+          "card": {
+            "allOf": [{ "$ref": "#/components/schemas/Card" }],
+            "description": "For a PlayCard decision, one card from playableCards."
+          },
+          "belote": {
+            "type": "boolean",
+            "default": false,
+            "description": "Set true only when the selected card is listed in beloteCards."
+          }
+        }
+      },
+      "AnnounceRequest": {
+        "type": "object",
+        "required": ["type", "card"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["Belot", "SequenceOf3", "SequenceOf4", "SequenceOf5", "SequenceOf6", "SequenceOf7", "SequenceOf8", "FourOfAKind", "FourNines", "FourJacks"]
+          },
+          "card": { "$ref": "#/components/schemas/Card" }
+        },
+        "description": "Select an offered declaration using its type and card from availableAnnounces."
+      },
+      "Card": {
+        "type": "object",
+        "required": ["suit", "type"],
+        "properties": {
+          "suit": { "type": "string", "enum": ["Club", "Diamond", "Heart", "Spade"] },
+          "type": { "type": "string", "enum": ["Seven", "Eight", "Nine", "Ten", "Jack", "Queen", "King", "Ace"] }
+        },
+        "description": "A card is identified by the singular enum names suit and type, for example {\"suit\":\"Heart\",\"type\":\"Ace\"}."
+      },
+      "Bid": {
+        "type": "object",
+        "required": ["seat", "type"],
+        "properties": {
+          "seat": { "type": "string", "enum": ["South", "East", "North", "West"] },
+          "type": {
+            "type": "string",
+            "description": "A bid name. Contract types can include comma-separated flags such as Double or ReDouble.",
+            "example": "Clubs"
+          }
+        }
+      },
+      "Announce": {
+        "type": "object",
+        "required": ["seat", "type", "card", "isScored"],
+        "properties": {
+          "seat": { "type": "string", "enum": ["South", "East", "North", "West"] },
+          "type": { "type": "string", "enum": ["Belot", "SequenceOf3", "SequenceOf4", "SequenceOf5", "SequenceOf6", "SequenceOf7", "SequenceOf8", "FourOfAKind", "FourNines", "FourJacks"] },
+          "card": { "allOf": [{ "$ref": "#/components/schemas/Card" }], "nullable": true },
+          "isScored": { "type": "boolean", "nullable": true }
+        }
+      },
+      "PlayedCard": {
+        "type": "object",
+        "required": ["seat", "card", "belote"],
+        "properties": {
+          "seat": { "type": "string", "enum": ["South", "East", "North", "West"] },
+          "card": { "$ref": "#/components/schemas/Card" },
+          "belote": { "type": "boolean" }
+        }
+      },
+      "Trick": {
+        "type": "object",
+        "required": ["cards", "winner"],
+        "properties": {
+          "cards": { "type": "array", "items": { "$ref": "#/components/schemas/PlayedCard" } },
+          "winner": { "type": "string", "enum": ["South", "East", "North", "West"] }
+        }
+      },
+      "RoundSummary": {
+        "type": "object",
+        "required": ["roundNumber", "contract", "southNorthPoints", "eastWestPoints", "southNorthTotalInRoundPoints", "eastWestTotalInRoundPoints", "hangingPoints", "bids", "announces", "tricks"],
+        "properties": {
+          "roundNumber": { "type": "integer" },
+          "contract": { "$ref": "#/components/schemas/Bid" },
+          "southNorthPoints": { "type": "integer" },
+          "eastWestPoints": { "type": "integer" },
+          "southNorthTotalInRoundPoints": { "type": "integer" },
+          "eastWestTotalInRoundPoints": { "type": "integer" },
+          "hangingPoints": { "type": "integer" },
+          "bids": { "type": "array", "items": { "$ref": "#/components/schemas/Bid" } },
+          "announces": { "type": "array", "items": { "$ref": "#/components/schemas/Announce" } },
+          "tricks": { "type": "array", "items": { "$ref": "#/components/schemas/Trick" } }
+        }
+      },
+      "GameState": {
+        "type": "object",
+        "required": ["gameId", "bots", "isFinished", "winner", "toMove", "decision", "roundNumber", "firstToPlay", "southNorthPoints", "eastWestPoints", "hangingPoints", "contract", "bids", "announces", "tricks", "currentTrick", "cardCounts", "hand", "availableBids", "availableAnnounces", "playableCards", "beloteCards", "previousRounds"],
+        "properties": {
+          "gameId": { "type": "string", "description": "Opaque bearer token for this in-memory game." },
+          "bots": { "type": "object", "additionalProperties": { "type": "string", "enum": ["random", "beginner", "skilled", "expert", "master"] }, "example": { "North": "skilled", "East": "skilled", "West": "skilled" } },
+          "isFinished": { "type": "boolean" },
+          "winner": { "type": "string", "enum": ["SouthNorthTeam", "EastWestTeam"], "nullable": true },
+          "toMove": { "type": "string", "enum": ["South", "East", "North", "West", "Unknown"] },
+          "decision": { "type": "string", "enum": ["None", "Bid", "Announce", "PlayCard"] },
+          "roundNumber": { "type": "integer" },
+          "firstToPlay": { "type": "string", "enum": ["South", "East", "North", "West"] },
+          "southNorthPoints": { "type": "integer" },
+          "eastWestPoints": { "type": "integer" },
+          "hangingPoints": { "type": "integer" },
+          "contract": { "$ref": "#/components/schemas/Bid" },
+          "bids": { "type": "array", "items": { "$ref": "#/components/schemas/Bid" } },
+          "announces": { "type": "array", "items": { "$ref": "#/components/schemas/Announce" } },
+          "tricks": { "type": "array", "items": { "$ref": "#/components/schemas/Trick" } },
+          "currentTrick": { "type": "array", "items": { "$ref": "#/components/schemas/PlayedCard" } },
+          "cardCounts": { "type": "array", "items": { "type": "integer" }, "description": "Card counts in engine seat order: South, East, North, West." },
+          "hand": { "type": "array", "items": { "$ref": "#/components/schemas/Card" }, "description": "Only South's hand." },
+          "availableBids": { "type": "array", "items": { "type": "string", "enum": ["Pass", "Clubs", "Diamonds", "Hearts", "Spades", "NoTrumps", "AllTrumps", "Double", "ReDouble"] } },
+          "availableAnnounces": { "type": "array", "items": { "$ref": "#/components/schemas/Announce" } },
+          "playableCards": { "type": "array", "items": { "$ref": "#/components/schemas/Card" } },
+          "beloteCards": { "type": "array", "items": { "$ref": "#/components/schemas/Card" } },
+          "previousRounds": { "type": "array", "items": { "$ref": "#/components/schemas/RoundSummary" } }
+        }
+      },
+      "PublicGameEvent": {
+        "type": "object",
+        "required": ["sequence", "type", "roundNumber", "seat", "bid", "contractSeat", "contract", "automatic", "card", "belote", "trickNumber", "cards", "winner", "announces", "southNorthPoints", "eastWestPoints", "southNorthTotalInRoundPoints", "eastWestTotalInRoundPoints", "hangingPoints", "matchFinished"],
+        "properties": {
+          "sequence": { "type": "integer" },
+          "type": { "type": "string", "enum": ["bid", "contract", "declarations", "card", "trick", "deal-ended", "deal-started"] },
+          "roundNumber": { "type": "integer" },
+          "seat": { "type": "string", "enum": ["South", "East", "North", "West"], "nullable": true },
+          "bid": { "type": "string", "nullable": true },
+          "contractSeat": { "type": "string", "enum": ["South", "East", "North", "West"], "nullable": true },
+          "contract": { "type": "string", "nullable": true },
+          "automatic": { "type": "boolean", "nullable": true },
+          "card": { "allOf": [{ "$ref": "#/components/schemas/Card" }], "nullable": true },
+          "belote": { "type": "boolean", "nullable": true },
+          "trickNumber": { "type": "integer", "nullable": true },
+          "cards": { "type": "array", "items": { "$ref": "#/components/schemas/PlayedCard" }, "nullable": true },
+          "winner": { "type": "string", "enum": ["South", "East", "North", "West"], "nullable": true },
+          "announces": { "type": "array", "items": { "$ref": "#/components/schemas/Announce" }, "nullable": true },
+          "southNorthPoints": { "type": "integer", "nullable": true },
+          "eastWestPoints": { "type": "integer", "nullable": true },
+          "southNorthTotalInRoundPoints": { "type": "integer", "nullable": true },
+          "eastWestTotalInRoundPoints": { "type": "integer", "nullable": true },
+          "hangingPoints": { "type": "integer", "nullable": true },
+          "matchFinished": { "type": "boolean", "nullable": true }
+        }
+      },
+      "GameActionResponse": {
+        "type": "object",
+        "required": ["state", "events"],
+        "properties": {
+          "state": { "$ref": "#/components/schemas/GameState" },
+          "events": { "type": "array", "items": { "$ref": "#/components/schemas/PublicGameEvent" } }
+        }
+      }
+    }
+  }
+}

@@ -25,6 +25,7 @@ it listens on `http://localhost:5266`.
   `beginner`, `skilled`, `expert` or `master`; all default to `skilled`.
 - `GET /api/games/{gameId}` — current South-seat view.
 - `POST /api/games/{gameId}/actions` — submits South's current bid, declarations or card.
+- `GET /openapi/v1.json` — public OpenAPI 3.0 specification for the endpoints and JSON contract.
 
 The profiles match the app: Random is `RandomPlayer`, Beginner `DummyPlayer`, Skilled
 `SmartPlayer`, Expert `ClaudePlayerProfiles.CreateExpert()`, and Master
@@ -88,17 +89,24 @@ return 404 and actions after match completion return 409.
 
 ## Configuration and deployment
 
-Set `Cors__AllowedOrigins__0` (and further indexed values) to the exact browser origins allowed to
-call the API, for example `https://your-frontend.example`. The default list is empty. The global
-IP-based rate limit defaults to 120 requests per 60 seconds; tune it with `RateLimit__PermitLimit`
-and `RateLimit__WindowSeconds`. `Games__MaximumActive` limits stored games (default 500).
+In Render, add the environment variable `Cors__AllowedOrigins__0` with the exact Lovable
+application **origin**, for example `https://your-app.lovable.app` (scheme and host, with a port
+only when applicable; no path or trailing slash). Additional trusted origins can be configured as
+`Cors__AllowedOrigins__1`, `Cors__AllowedOrigins__2`, and so on. The default list is empty, and
+other origins are not allowed. The CORS policy permits GET, POST and OPTIONS, and the Content-Type
+and Accept request headers; credentials are not enabled.
+
+The public API contract is available at `https://belotgameengine.onrender.com/openapi/v1.json`.
+The global IP-based rate limit defaults to 120 requests per 60 seconds; tune it with
+`RateLimit__PermitLimit` and `RateLimit__WindowSeconds`. `Games__MaximumActive` limits stored
+games (default 500).
 
 Build and run the root Dockerfile:
 
 ```sh
 docker build -t belot-web-api .
 docker run --rm -p 10000:10000 \
-  -e 'Cors__AllowedOrigins__0=https://your-frontend.example' \
+  -e 'Cors__AllowedOrigins__0=https://your-app.lovable.app' \
   belot-web-api
 ```
 

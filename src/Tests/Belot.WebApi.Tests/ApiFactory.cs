@@ -12,6 +12,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             (_, configuration) => configuration.AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["RateLimit:PermitLimit"] = "10000",
+                ["Cors:AllowedOrigins:0"] = "https://lovable.example",
             }));
     }
 }
