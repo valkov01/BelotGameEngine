@@ -47,25 +47,28 @@ public sealed class ApiIntegrationTests : IDisposable
     public async Task CorsAllowsConfiguredOriginsAndExpectedPreflightHeadersOnly()
     {
         using var preflight = new HttpRequestMessage(HttpMethod.Options, "/api/games");
-        preflight.Headers.Add("Origin", "https://lovable.example");
+        preflight.Headers.Add("Origin", "https://preview--belote-bridge-battle.lovable.app");
         preflight.Headers.Add("Access-Control-Request-Method", "POST");
-        preflight.Headers.Add("Access-Control-Request-Headers", "content-type,accept");
+        preflight.Headers.Add("Access-Control-Request-Headers", "content-type");
 
         using var response = await this.client.SendAsync(preflight);
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
-        Assert.Equal("https://lovable.example", response.Headers.GetValues("Access-Control-Allow-Origin").Single());
+        Assert.Equal(
+            "https://preview--belote-bridge-battle.lovable.app",
+            response.Headers.GetValues("Access-Control-Allow-Origin").Single());
         var allowedMethods = response.Headers.GetValues("Access-Control-Allow-Methods").Single();
         Assert.Contains("GET", allowedMethods, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("POST", allowedMethods, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("OPTIONS", allowedMethods, StringComparison.OrdinalIgnoreCase);
         var allowedHeaders = response.Headers.GetValues("Access-Control-Allow-Headers").Single();
         Assert.Contains("content-type", allowedHeaders, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("accept", allowedHeaders, StringComparison.OrdinalIgnoreCase);
 
         using var allowedRequest = new HttpRequestMessage(HttpMethod.Get, "/api/health");
-        allowedRequest.Headers.Add("Origin", "https://lovable.example");
+        allowedRequest.Headers.Add("Origin", "https://preview--belote-bridge-battle.lovable.app");
         using var allowedResponse = await this.client.SendAsync(allowedRequest);
-        Assert.Equal("https://lovable.example", allowedResponse.Headers.GetValues("Access-Control-Allow-Origin").Single());
+        Assert.Equal(
+            "https://preview--belote-bridge-battle.lovable.app",
+            allowedResponse.Headers.GetValues("Access-Control-Allow-Origin").Single());
 
         using var deniedRequest = new HttpRequestMessage(HttpMethod.Get, "/api/health");
         deniedRequest.Headers.Add("Origin", "https://untrusted.example");

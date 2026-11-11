@@ -89,12 +89,13 @@ return 404 and actions after match completion return 409.
 
 ## Configuration and deployment
 
-In Render, add the environment variable `Cors__AllowedOrigins__0` with the exact Lovable
-application **origin**, for example `https://your-app.lovable.app` (scheme and host, with a port
-only when applicable; no path or trailing slash). Additional trusted origins can be configured as
-`Cors__AllowedOrigins__1`, `Cors__AllowedOrigins__2`, and so on. The default list is empty, and
-other origins are not allowed. The CORS policy permits GET, POST and OPTIONS, and the Content-Type
-and Accept request headers; credentials are not enabled.
+The default allowed origin is `https://preview--belote-bridge-battle.lovable.app`. In Render, set
+the environment variable `Cors__AllowedOrigins__0` to that exact origin (scheme and host, with a
+port only when applicable; no path or trailing slash). This is the ASP.NET Core environment-variable
+form of `Cors:AllowedOrigins:0`. Additional trusted origins can be configured as
+`Cors__AllowedOrigins__1`, `Cors__AllowedOrigins__2`, and so on. Only configured origins are
+allowed. The CORS policy permits GET, POST and OPTIONS, and the Content-Type and Accept request
+headers; credentials are not enabled.
 
 The public API contract is available at `https://belotgameengine.onrender.com/openapi/v1.json`.
 The global IP-based rate limit defaults to 120 requests per 60 seconds; tune it with
