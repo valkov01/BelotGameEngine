@@ -7,6 +7,12 @@
     <ProjectReference Include="..\AI\Belot.AI.ClaudePlayer\Belot.AI.ClaudePlayer.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Belot.WebApi.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>

@@ -4,6 +4,8 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 
+using Belot.AI.ClaudePlayer;
+
 using Xunit;
 
 public sealed class ApiIntegrationTests : IDisposable
@@ -119,6 +121,12 @@ public sealed class ApiIntegrationTests : IDisposable
             Assert.Contains(result.Events, gameEvent => gameEvent.Seat != "South" && gameEvent.Automatic == true);
             Assert.Equal("South", result.State.ToMove);
         }
+    }
+
+    [Fact]
+    public void MasterProfileCreatesNeuralMaster()
+    {
+        Assert.IsType<ClaudePlayerNeural>(BotProfiles.Create("master"));
     }
 
     [Fact]
@@ -339,6 +347,62 @@ public sealed class ApiIntegrationTests : IDisposable
 
         var finishedAction = await this.PostActionAsync(state.GameId, new { bid = "Pass" });
         Assert.Equal(HttpStatusCode.Conflict, finishedAction.StatusCode);
+    }
+
+    [Fact]
+    public async Task ThreeNeuralMastersCompleteAFullMatchThroughTheApi()
+    {
+        var state = await this.CreateGameAsync(new CreateGameRequest { North = "master", East = "master", West = "master" });
+        var bidResponse = await this.PostActionAsync(state.GameId, new { bid = "AllTrumps" });
+        Assert.Equal(HttpStatusCode.OK, bidResponse.StatusCode);
+        var firstAction = (await bidResponse.Content.ReadFromJsonAsync<GameActionResponse>())!;
+        state = firstAction.State;
+
+        var automaticBids = firstAction.Events
+            .Where(gameEvent => gameEvent.Type == "bid" && gameEvent.Automatic == true)
+            .Select(gameEvent => gameEvent.Seat)
+            .ToArray();
+        Assert.Equal(new[] { "East", "North", "West" }, automaticBids);
+
+        var eventTypes = new HashSet<string>(firstAction.Events.Select(gameEvent => gameEvent.Type), StringComparer.Ordinal);
+        for (var actionIndex = 0; actionIndex < 1000 && !state.IsFinished; actionIndex++)
+        {
+            var result = await this.SubmitFirstAvailableActionAsync(state);
+            state = result.State;
+            eventTypes.UnionWith(result.Events.Select(gameEvent => gameEvent.Type));
+            Assert.True(state.IsFinished || state.ToMove == "South");
+        }
+
+        Assert.True(state.IsFinished, "The match did not finish within the action limit.");
+        Assert.NotNull(state.Winner);
+        Assert.Contains("declarations", eventTypes);
+        Assert.Contains("card", eventTypes);
+        Assert.Contains("trick", eventTypes);
+        Assert.Contains("deal-ended", eventTypes);
+        Assert.Equal(state.SouthNorthPoints, state.PreviousRounds.Sum(round => round.SouthNorthPoints));
+        Assert.Equal(state.EastWestPoints, state.PreviousRounds.Sum(round => round.EastWestPoints));
+        Assert.True(state.SouthNorthPoints >= 151 || state.EastWestPoints >= 151);
+        var nextSeat = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["South"] = "East",
+            ["East"] = "North",
+            ["North"] = "West",
+            ["West"] = "South",
+        };
+        Assert.All(
+            state.PreviousRounds.Where(round => round.Contract.Type != "Pass"),
+            round =>
+            {
+                Assert.Equal(8, round.Tricks.Count);
+                Assert.Equal(32, round.Tricks.Sum(trick => trick.Cards.Count));
+                foreach (var trick in round.Tricks)
+                {
+                    for (var cardIndex = 1; cardIndex < trick.Cards.Count; cardIndex++)
+                    {
+                        Assert.Equal(nextSeat[trick.Cards[cardIndex - 1].Seat], trick.Cards[cardIndex].Seat);
+                    }
+                }
+            });
     }
 
     [Fact]

@@ -29,7 +29,7 @@ internal static class BotProfiles
         "beginner" => new DummyPlayer(),
         "skilled" => new SmartPlayer(),
         "expert" => ClaudePlayerProfiles.CreateExpert(),
-        "master" => ClaudePlayerProfiles.CreateHeuristic(),
+        "master" => ClaudePlayerProfiles.CreateMaster(),
         _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
 }
