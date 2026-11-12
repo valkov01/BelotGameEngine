@@ -3,7 +3,7 @@
   "info": {
     "title": "Belot Game API",
     "version": "v1",
-    "description": "Play a Belot match as South against the original BelotGameEngine bots. All JSON property names are camelCase."
+    "description": "Play a solo match against the original BelotGameEngine bots or create a private multiplayer lobby. Multiplayer lobby routes require a Supabase access token. All JSON property names are camelCase."
   },
   "servers": [
     {
@@ -220,15 +220,343 @@
           "429": { "$ref": "#/components/responses/RateLimited" }
         }
       }
+    },
+    "/api/multiplayer/lobbies": {
+      "post": {
+        "operationId": "createMultiplayerLobby",
+        "summary": "Create a private multiplayer lobby",
+        "description": "Creates a lobby with the authenticated user at South. The invitation code is returned only in this response; share it privately with invitees.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMultiplayerRoomRequest"
+              },
+              "example": {
+                "maximumHumanPlayers": 4,
+                "eastBot": "random",
+                "northBot": "expert",
+                "westBot": "master"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Lobby created; the Location header identifies the member-only lobby resource.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Relative URL of the created lobby."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateMultiplayerRoomResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidLobbyRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/api/multiplayer/lobbies/{roomId}": {
+      "parameters": [
+        {
+          "name": "roomId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Opaque lobby ID returned by POST /api/multiplayer/lobbies."
+        }
+      ],
+      "get": {
+        "operationId": "getMultiplayerLobby",
+        "summary": "Read a lobby as a member",
+        "description": "Returns public seat occupancy and readiness, plus the authenticated member's own absolute seat. Re-authenticate and fetch this resource to reconnect; the invitation code is never returned.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current lobby state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MultiplayerRoom"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/api/multiplayer/lobbies/{roomId}/join": {
+      "parameters": [
+        {
+          "name": "roomId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Opaque lobby ID returned by POST /api/multiplayer/lobbies."
+        }
+      ],
+      "post": {
+        "operationId": "joinMultiplayerLobby",
+        "summary": "Join a private lobby",
+        "description": "Claims the requested free absolute seat for the authenticated user. Requires the private invitation code; user IDs and seat ownership are derived and enforced by the server.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JoinMultiplayerRoomRequest"
+              },
+              "example": {
+                "invitationCode": "one-time-secret",
+                "seat": "East"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lobby after the seat claim.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MultiplayerRoom"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidLobbyRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/LobbyConflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/api/multiplayer/lobbies/{roomId}/ready": {
+      "parameters": [
+        {
+          "name": "roomId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Opaque lobby ID returned by POST /api/multiplayer/lobbies."
+        }
+      ],
+      "post": {
+        "operationId": "setMultiplayerLobbyReady",
+        "summary": "Set the authenticated member's ready state",
+        "description": "A member may mark themselves ready or not ready while the lobby is waiting for players.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetMultiplayerReadyRequest"
+              },
+              "example": {
+                "isReady": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lobby after the readiness change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MultiplayerRoom"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/LobbyConflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/api/multiplayer/lobbies/{roomId}/start": {
+      "parameters": [
+        {
+          "name": "roomId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Opaque lobby ID returned by POST /api/multiplayer/lobbies."
+        }
+      ],
+      "post": {
+        "operationId": "startMultiplayerLobby",
+        "summary": "Start the lobby as its host",
+        "description": "Requires at least two human members and readiness from every joined member. All remaining seats are assigned the host-selected bot profiles. This starts the lobby lifecycle only; it does not create or persist game state.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Started lobby with all seats assigned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MultiplayerRoom"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/LobbyConflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
     }
   },
   "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Supabase Auth access token."
+      }
+    },
     "responses": {
       "RateLimited": {
         "description": "The per-IP request limit has been reached. The API returns an empty 429 response."
       },
       "Unavailable": {
         "description": "The API cannot create a game because its active-game capacity has been reached. The response has no body."
+      },
+      "InvalidLobbyRequest": {
+        "description": "The lobby settings, selected seat, invitation code or ready request is invalid.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "The request does not contain a valid Supabase access token."
+      },
+      "Forbidden": {
+        "description": "The caller is not a lobby member, is not the host, or supplied an invalid invitation code."
+      },
+      "NotFound": {
+        "description": "No lobby exists with this ID.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
+      },
+      "LobbyConflict": {
+        "description": "The seat is occupied, the lobby is full or started, the caller already has a seat, or start requirements are not met.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        }
       }
     },
     "schemas": {
@@ -252,6 +580,207 @@
         "required": ["error"],
         "properties": {
           "error": { "type": "string" }
+        }
+      },
+      "CreateMultiplayerRoomRequest": {
+        "type": "object",
+        "properties": {
+          "maximumHumanPlayers": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 4,
+            "default": 4
+          },
+          "eastBot": {
+            "type": "string",
+            "enum": [
+              "random",
+              "beginner",
+              "skilled",
+              "expert",
+              "master"
+            ],
+            "default": "skilled"
+          },
+          "northBot": {
+            "type": "string",
+            "enum": [
+              "random",
+              "beginner",
+              "skilled",
+              "expert",
+              "master"
+            ],
+            "default": "skilled"
+          },
+          "westBot": {
+            "type": "string",
+            "enum": [
+              "random",
+              "beginner",
+              "skilled",
+              "expert",
+              "master"
+            ],
+            "default": "skilled"
+          }
+        }
+      },
+      "CreateMultiplayerRoomResponse": {
+        "type": "object",
+        "required": [
+          "room",
+          "invitationCode"
+        ],
+        "properties": {
+          "room": {
+            "$ref": "#/components/schemas/MultiplayerRoom"
+          },
+          "invitationCode": {
+            "type": "string",
+            "minLength": 43,
+            "maxLength": 43,
+            "description": "One-time private invitation secret. The API stores only its SHA-256 hash."
+          }
+        }
+      },
+      "JoinMultiplayerRoomRequest": {
+        "type": "object",
+        "required": [
+          "invitationCode",
+          "seat"
+        ],
+        "properties": {
+          "invitationCode": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "seat": {
+            "type": "string",
+            "enum": [
+              "East",
+              "North",
+              "West"
+            ],
+            "description": "Absolute engine seat requested by this authenticated user."
+          }
+        }
+      },
+      "SetMultiplayerReadyRequest": {
+        "type": "object",
+        "required": [
+          "isReady"
+        ],
+        "properties": {
+          "isReady": {
+            "type": "boolean"
+          }
+        }
+      },
+      "MultiplayerRoom": {
+        "type": "object",
+        "required": [
+          "roomId",
+          "status",
+          "createdAt",
+          "yourSeat",
+          "humanPlayerCount",
+          "maximumHumanPlayers",
+          "seats"
+        ],
+        "properties": {
+          "roomId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "WaitingForPlayers",
+              "Started"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "yourSeat": {
+            "type": "string",
+            "enum": [
+              "South",
+              "East",
+              "North",
+              "West"
+            ]
+          },
+          "humanPlayerCount": {
+            "type": "integer"
+          },
+          "maximumHumanPlayers": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 4
+          },
+          "seats": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {
+              "$ref": "#/components/schemas/MultiplayerSeat"
+            }
+          }
+        }
+      },
+      "MultiplayerSeat": {
+        "type": "object",
+        "required": [
+          "seat",
+          "team",
+          "isOccupied",
+          "isHost",
+          "isReady",
+          "botProfileId"
+        ],
+        "properties": {
+          "seat": {
+            "type": "string",
+            "enum": [
+              "South",
+              "East",
+              "North",
+              "West"
+            ]
+          },
+          "team": {
+            "type": "string",
+            "enum": [
+              "SouthNorth",
+              "EastWest"
+            ]
+          },
+          "isOccupied": {
+            "type": "boolean",
+            "description": "True for a human or, after start, a bot."
+          },
+          "isHost": {
+            "type": "boolean"
+          },
+          "isReady": {
+            "type": "boolean",
+            "description": "Readiness of the human owner; false for bot and vacant seats."
+          },
+          "botProfileId": {
+            "type": "string",
+            "enum": [
+              "random",
+              "beginner",
+              "skilled",
+              "expert",
+              "master"
+            ],
+            "nullable": true,
+            "description": "Selected bot profile for a vacant seat or assigned bot."
+          }
         }
       },
       "CreateGameRequest": {

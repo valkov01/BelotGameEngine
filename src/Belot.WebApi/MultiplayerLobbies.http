@@ -1,0 +1,43 @@
+@baseUrl = https://localhost:5001
+@accessToken = <Supabase access token>
+@lobbyId = <room id returned by create>
+@invitationCode = <invitation code returned by create>
+
+### Create a private lobby (host is assigned South)
+POST {{baseUrl}}/api/multiplayer/lobbies
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "maximumHumanPlayers": 4,
+  "eastBot": "random",
+  "northBot": "expert",
+  "westBot": "master"
+}
+
+### Read the lobby (member only; reconnect uses the same request)
+GET {{baseUrl}}/api/multiplayer/lobbies/{{lobbyId}}
+Authorization: Bearer {{accessToken}}
+
+### Join with an invitation and choose a free absolute seat
+POST {{baseUrl}}/api/multiplayer/lobbies/{{lobbyId}}/join
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "invitationCode": "{{invitationCode}}",
+  "seat": "East"
+}
+
+### Mark this authenticated member ready, or set false to revoke readiness
+POST {{baseUrl}}/api/multiplayer/lobbies/{{lobbyId}}/ready
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "isReady": true
+}
+
+### Host only; requires two or more human members and all members ready
+POST {{baseUrl}}/api/multiplayer/lobbies/{{lobbyId}}/start
+Authorization: Bearer {{accessToken}}

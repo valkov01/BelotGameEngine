@@ -326,11 +326,43 @@ frontend work begins.
 - Full match recovery after process restart is a pre-launch requirement, not part of A03.
 - A03 provides configurable JWT validation and an in-memory room/seat-ownership contract only.
   Production use still requires Supabase project configuration and durable persistence.
-- **Next: A04** should add the private invitation/join flow and durable Supabase Postgres
-  membership/seat repository with unique `(room_id, user_id)` and `(room_id, seat)` constraints,
-  plus readiness and host-start operations. Start must require at least two authenticated humans
-  and all joined members ready, then fill every vacant seat with its configured bot. A04 should
-  test the 2/3/4-human assignments and conflicts while preserving this A03 API/domain boundary.
+- **A04 implementation:** `src/Belot.WebApi/MultiplayerRooms.cs` now adds lobby configuration,
+  one-time invitation codes, member readiness and host-only start. `POST
+  /api/multiplayer/lobbies` returns the invitation secret once; only its SHA-256 hash is stored.
+  Joining requires both that secret and an available absolute seat. A host starts with at least two
+  human members and all joined members ready; the operation assigns configured bots to every
+  remaining seat. Lobby reads are member-only and do not return user IDs or invitation secrets.
+  The former `/rooms` create/read/join paths remain aliases, and joining through the alias also
+  requires the invitation secret.
+- `src/Belot.WebApi/PostgresMultiplayerRoomRepository.cs` implements room and seat persistence
+  with row-locked transactions for joining, readiness and start. The
+  `src/Belot.WebApi/Migrations/001_multiplayer_lobbies.sql` migration creates the room and seat
+  tables, unique room/seat and room/owner constraints, a unique invitation hash, server-only RLS
+  access and bot-profile constraints. This stores lobby membership and bot assignments only; it
+  does not persist `BelotMatch` state or make a running game restart-safe.
+- Configure either `ConnectionStrings:Multiplayer` or `Multiplayer:PostgresConnectionString` to
+  select Postgres. Apply the checked-in migration manually to the Supabase database before
+  enabling that setting; migrations are not applied by application startup. Without a connection
+  string, the API logs a warning and uses the process-local implementation, which loses rooms on
+  restart and is unsuitable for production. For production, use a backend-only database
+  credential and TLS (`SSL Mode=Require`); review and apply the SQL once through the approved
+  Supabase migration process before configuring the API. No migration or deployment was run for
+  A04.
+- Supabase JWT validation allows `RS256` and `ES256` through the configured HTTPS OIDC Authority
+  and its published signing keys. `HS256` is allowed only when the server also receives
+  `Authentication:Supabase:JwtSecret` (the legacy/shared-secret value) with at least 32 UTF-8
+  bytes. Tests validate local RSA, ECDSA and configured HMAC tokens, but do not use a production
+  Supabase project. The project URL, Auth issuer/audience and signing-key algorithm were not
+  provided, so compatibility with that particular project's live key set remains an integration
+  check. Confirm the algorithm shown under the project's Supabase Auth JWT Signing Keys and set
+  `Authentication:Supabase:Authority` to its HTTPS Auth issuer, `Authentication:Supabase:Issuer`
+  to the exact token issuer if different, and `Authentication:Supabase:Audience` to its access
+  token audience (normally `authenticated`). Do not configure a shared secret for asymmetric
+  keys or vice versa.
+- A04 tests cover invitation secrecy and rejection, host-South assignment, member-only reconnect
+  reads, readiness reversal, host-only start, maximum capacity, concurrent claims, bot fill, and
+  two/three/four human seats. Gameplay actions, SignalR, the Lovable UI, process-restart recovery,
+  migrations against a remote database and deployment remain out of scope.
 
 ## A03 implementation record
 

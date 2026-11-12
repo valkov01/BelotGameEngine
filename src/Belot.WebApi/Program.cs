@@ -14,6 +14,17 @@ var rateWindowSeconds = Math.Clamp(builder.Configuration.GetValue("RateLimit:Win
 var supabaseAuthority = builder.Configuration["Authentication:Supabase:Authority"];
 var supabaseIssuer = builder.Configuration["Authentication:Supabase:Issuer"] ?? supabaseAuthority;
 var supabaseAudience = builder.Configuration["Authentication:Supabase:Audience"] ?? "authenticated";
+var supabaseJwtSecret = builder.Configuration["Authentication:Supabase:JwtSecret"];
+var postgresConnectionString = builder.Configuration.GetConnectionString("Multiplayer")
+    ?? builder.Configuration["Multiplayer:PostgresConnectionString"];
+var validSupabaseAlgorithms = string.IsNullOrEmpty(supabaseJwtSecret)
+    ? new[] { SecurityAlgorithms.EcdsaSha256, SecurityAlgorithms.RsaSha256 }
+    : new[] { SecurityAlgorithms.EcdsaSha256, SecurityAlgorithms.RsaSha256, SecurityAlgorithms.HmacSha256 };
+
+if (!string.IsNullOrEmpty(supabaseJwtSecret) && Encoding.UTF8.GetByteCount(supabaseJwtSecret) < 32)
+{
+    throw new InvalidOperationException("Authentication:Supabase:JwtSecret must contain at least 32 UTF-8 bytes.");
+}
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -36,8 +47,14 @@ builder.Services
             ValidAudience = supabaseAudience,
             ValidateLifetime = true,
             ValidateIssuerSigningKey = true,
+            ValidAlgorithms = validSupabaseAlgorithms,
             ClockSkew = TimeSpan.FromSeconds(30),
         };
+        if (!string.IsNullOrEmpty(supabaseJwtSecret))
+        {
+            options.TokenValidationParameters.IssuerSigningKey =
+                new SymmetricSecurityKey(Encoding.UTF8.GetBytes(supabaseJwtSecret));
+        }
     });
 
 builder.Services.AddAuthorization(options =>
@@ -80,12 +97,26 @@ builder.Services.AddRateLimiter(options =>
 builder.Services.AddSingleton<GameStore>();
 builder.Services.AddSingleton<GameService>();
 builder.Services.AddSingleton<DebugHandsAccess>();
-builder.Services.AddSingleton<IMultiplayerRoomRepository, InMemoryMultiplayerRoomRepository>();
+if (string.IsNullOrWhiteSpace(postgresConnectionString))
+{
+    builder.Services.AddSingleton<IMultiplayerRoomRepository, InMemoryMultiplayerRoomRepository>();
+}
+else
+{
+    builder.Services.AddSingleton(Npgsql.NpgsqlDataSource.Create(postgresConnectionString));
+    builder.Services.AddSingleton<IMultiplayerRoomRepository, PostgresMultiplayerRoomRepository>();
+}
+
 builder.Services.AddSingleton<MultiplayerRoomService>();
 builder.Services.AddSingleton<IRoomMembershipService>(services => services.GetRequiredService<MultiplayerRoomService>());
 builder.Services.AddSingleton<ISeatAssignmentService>(services => services.GetRequiredService<MultiplayerRoomService>());
 
 var app = builder.Build();
+
+if (string.IsNullOrWhiteSpace(postgresConnectionString))
+{
+    app.Logger.LogWarning("Multiplayer lobbies are using process-local storage. Configure Multiplayer:PostgresConnectionString for durable lobby persistence.");
+}
 
 app.UseRouting();
 app.UseCors();

@@ -4,6 +4,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using System.Text;
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Hosting;
@@ -19,37 +20,63 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     public const string TestAudience = "authenticated";
 
+    public const string TestJwtSecret = "testing-only-secret-key-with-at-least-thirty-two-bytes";
+
     private static readonly RSA TestRsa = RSA.Create(2048);
 
     private static readonly RsaSecurityKey TestSigningKey = new(TestRsa) { KeyId = "isolated-integration-test-key" };
+
+    private static readonly ECDsa TestEcdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+
+    private static readonly ECDsaSecurityKey TestEcSigningKey = new(TestEcdsa) { KeyId = "isolated-ec-test-key" };
+
+    private static readonly SymmetricSecurityKey TestHmacSigningKey = new(Encoding.UTF8.GetBytes(TestJwtSecret));
 
     private readonly bool revealHandsEnabled;
 
     private readonly string? debugAccessKey;
 
-    public ApiFactory(bool revealHandsEnabled = false, string? debugAccessKey = null)
+    private readonly bool useEcdsaSigningKey;
+
+    private readonly string? jwtSecret;
+
+    public ApiFactory(
+        bool revealHandsEnabled = false,
+        string? debugAccessKey = null,
+        bool useEcdsaSigningKey = false,
+        string? jwtSecret = null)
     {
         this.revealHandsEnabled = revealHandsEnabled;
         this.debugAccessKey = debugAccessKey;
+        this.useEcdsaSigningKey = useEcdsaSigningKey;
+        this.jwtSecret = jwtSecret;
     }
 
     public static string CreateAccessToken(
         string userId,
         string? issuer = null,
         string? audience = null,
-        DateTime? expires = null)
+        DateTime? expires = null,
+        string algorithm = "RS256")
     {
         var now = DateTime.UtcNow;
         var notBefore = expires.HasValue && expires.Value <= now
             ? expires.Value.AddMinutes(-1)
             : now.AddMinutes(-1);
+        var (key, signingAlgorithm) = algorithm switch
+        {
+            "RS256" => ((SecurityKey)TestSigningKey, SecurityAlgorithms.RsaSha256),
+            "ES256" => ((SecurityKey)TestEcSigningKey, SecurityAlgorithms.EcdsaSha256),
+            "HS256" => ((SecurityKey)TestHmacSigningKey, SecurityAlgorithms.HmacSha256),
+            _ => throw new ArgumentOutOfRangeException(nameof(algorithm)),
+        };
         var token = new JwtSecurityToken(
             issuer ?? TestIssuer,
             audience ?? TestAudience,
             new[] { new Claim("sub", userId) },
             notBefore,
             expires ?? now.AddMinutes(5),
-            new SigningCredentials(TestSigningKey, SecurityAlgorithms.RsaSha256));
+            new SigningCredentials(key, signingAlgorithm));
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
@@ -70,6 +97,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 ["Debug:AccessKey"] = this.debugAccessKey,
                 ["Authentication:Supabase:Issuer"] = TestIssuer,
                 ["Authentication:Supabase:Audience"] = TestAudience,
+                ["Authentication:Supabase:JwtSecret"] = this.jwtSecret,
             }));
 
         builder.ConfigureTestServices(services =>
@@ -84,7 +112,16 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                     ValidAudience = TestAudience,
                     ValidateLifetime = true,
                     ValidateIssuerSigningKey = true,
-                    IssuerSigningKey = TestSigningKey,
+                    IssuerSigningKey = this.jwtSecret is not null
+                        ? TestHmacSigningKey
+                        : this.useEcdsaSigningKey
+                            ? TestEcSigningKey
+                            : TestSigningKey,
+                    ValidAlgorithms = this.jwtSecret is not null
+                        ? new[] { SecurityAlgorithms.HmacSha256 }
+                        : this.useEcdsaSigningKey
+                            ? new[] { SecurityAlgorithms.EcdsaSha256 }
+                            : new[] { SecurityAlgorithms.RsaSha256 },
                     ClockSkew = TimeSpan.Zero,
                 };
             });
