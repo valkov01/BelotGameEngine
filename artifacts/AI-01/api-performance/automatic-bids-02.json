@@ -1,0 +1,112 @@
+{
+  "latency_ms": {
+    "human_bid_plus_automatic_bots": {
+      "n": 10,
+      "median_ms": 1.04,
+      "p95_ms": 99.29,
+      "max_ms": 99.29
+    }
+  },
+  "samples_ms": [
+    1.1682019999170734,
+    1.0100099998453516,
+    0.9303649999310437,
+    1.6282869996757654,
+    0.992510999822116,
+    0.9741100002429448,
+    1.2336979998508468,
+    1.068996999947558,
+    0.8413660002588585,
+    99.29240700012087
+  ],
+  "automatic_bot_bids_per_request": [
+    3,
+    5,
+    3,
+    5,
+    3,
+    3,
+    5,
+    3,
+    3,
+    3
+  ],
+  "automatic_bot_bid_types": [
+    [
+      "Pass",
+      "Diamonds",
+      "Spades"
+    ],
+    [
+      "Pass",
+      "AllTrumps",
+      "Pass",
+      "Pass",
+      "Pass"
+    ],
+    [
+      "Pass",
+      "Spades",
+      "Pass"
+    ],
+    [
+      "Pass",
+      "AllTrumps",
+      "Pass",
+      "Pass",
+      "Pass"
+    ],
+    [
+      "Pass",
+      "Pass",
+      "Pass"
+    ],
+    [
+      "Pass",
+      "Pass",
+      "Pass"
+    ],
+    [
+      "Pass",
+      "AllTrumps",
+      "Pass",
+      "Pass",
+      "Pass"
+    ],
+    [
+      "Pass",
+      "Pass",
+      "Pass"
+    ],
+    [
+      "Pass",
+      "Pass",
+      "Hearts"
+    ],
+    [
+      "Spades",
+      "NoTrumps",
+      "Pass"
+    ]
+  ],
+  "phase": "automatic-bids",
+  "wall_seconds": 0.2,
+  "resources": {
+    "docker_stats_sample_count": 1,
+    "sampled_peak_memory_mib": 48.57,
+    "sampled_peak_cpu_percent": 2.64,
+    "docker_stats_errors": [],
+    "cgroup_peak_memory_mib": 53.2,
+    "cgroup_memory_current_mib": 50.46,
+    "cgroup_cpu_seconds": 0.055,
+    "cgroup_cpu_cores_average": 0.0358,
+    "cgroup_throttled_usec": 220204,
+    "cgroup_throttled_periods": 4,
+    "cgroup_total_periods": 7
+  },
+  "limits": {
+    "cpus": 0.1,
+    "memory_mib": 512
+  },
+  "image": "belot-ai01-neural-ai01"
+}

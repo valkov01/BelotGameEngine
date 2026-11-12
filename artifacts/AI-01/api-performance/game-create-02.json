@@ -1,0 +1,52 @@
+{
+  "latency_ms": {
+    "game_create": {
+      "n": 20,
+      "median_ms": 1.47,
+      "p95_ms": 83.6,
+      "max_ms": 90.32
+    }
+  },
+  "samples_ms": [
+    57.61127599998872,
+    31.63558300002478,
+    2.1704019995922863,
+    1.3971209996270773,
+    2.579989999958343,
+    1.451736000035453,
+    1.6990130002341175,
+    1.2655639998229162,
+    1.4972849999139726,
+    2.137393000339216,
+    83.5967250000067,
+    1.493399000082718,
+    1.3721679997615865,
+    0.9768579998308269,
+    1.211864000197238,
+    1.0866799998439092,
+    1.035321000017575,
+    0.9600620001037896,
+    1.1229509996155684,
+    90.31853800024692
+  ],
+  "phase": "game-create",
+  "wall_seconds": 0.29,
+  "resources": {
+    "docker_stats_sample_count": 1,
+    "sampled_peak_memory_mib": 42.46,
+    "sampled_peak_cpu_percent": 2.81,
+    "docker_stats_errors": [],
+    "cgroup_peak_memory_mib": 46.75,
+    "cgroup_memory_current_mib": 44.19,
+    "cgroup_cpu_seconds": 0.057,
+    "cgroup_cpu_cores_average": 0.0398,
+    "cgroup_throttled_usec": 377512,
+    "cgroup_throttled_periods": 5,
+    "cgroup_total_periods": 10
+  },
+  "limits": {
+    "cpus": 0.1,
+    "memory_mib": 512
+  },
+  "image": "belot-ai01-neural-ai01"
+}

@@ -1,0 +1,40 @@
+{
+  "latency_ms": {
+    "round_completing_http_request": {
+      "n": 3,
+      "median_ms": 2.56,
+      "p95_ms": 99.47,
+      "max_ms": 99.47
+    }
+  },
+  "samples_ms": [
+    99.47453499989933,
+    2.5566220001564943,
+    2.103287999943859
+  ],
+  "human_actions_to_round_completion": [
+    9,
+    7,
+    7
+  ],
+  "phase": "round-complete",
+  "wall_seconds": 4.78,
+  "resources": {
+    "docker_stats_sample_count": 3,
+    "sampled_peak_memory_mib": 77.49,
+    "sampled_peak_cpu_percent": 10.05,
+    "docker_stats_errors": [],
+    "cgroup_peak_memory_mib": 81.42,
+    "cgroup_memory_current_mib": 78.89,
+    "cgroup_cpu_seconds": 0.581,
+    "cgroup_cpu_cores_average": 0.0946,
+    "cgroup_throttled_usec": 6574881,
+    "cgroup_throttled_periods": 58,
+    "cgroup_total_periods": 58
+  },
+  "limits": {
+    "cpus": 0.1,
+    "memory_mib": 512
+  },
+  "image": "belot-ai01-neural-ai01"
+}

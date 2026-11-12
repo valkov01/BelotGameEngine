@@ -1,0 +1,61 @@
+{
+  "concurrency": 4,
+  "latency_ms": {
+    "parallel_bid_plus_automatic_bots": {
+      "n": 4,
+      "median_ms": 31.99,
+      "p95_ms": 32.09,
+      "max_ms": 32.09
+    },
+    "parallel_card_plus_automatic_bots": {
+      "n": 4,
+      "median_ms": 1550.26,
+      "p95_ms": 2300.51,
+      "max_ms": 2300.51
+    }
+  },
+  "parallel_bid_samples_ms": [
+    31.89654000016162,
+    32.09304499978316,
+    32.0735930004048,
+    31.541020999611646
+  ],
+  "parallel_card_samples_ms": [
+    1801.1132950000501,
+    2300.5088880004223,
+    1299.4124179999744,
+    1296.3671369998337
+  ],
+  "automatic_bot_bids_per_request": [
+    3,
+    3,
+    3,
+    3
+  ],
+  "automatic_bot_cards_per_request": [
+    7,
+    6,
+    3,
+    4
+  ],
+  "phase": "concurrent-games",
+  "wall_seconds": 2.59,
+  "resources": {
+    "docker_stats_sample_count": 2,
+    "sampled_peak_memory_mib": 83.16,
+    "sampled_peak_cpu_percent": 9.93,
+    "docker_stats_errors": [],
+    "cgroup_peak_memory_mib": 87.59,
+    "cgroup_memory_current_mib": 84.44,
+    "cgroup_cpu_seconds": 0.387,
+    "cgroup_cpu_cores_average": 0.0926,
+    "cgroup_throttled_usec": 6338763,
+    "cgroup_throttled_periods": 39,
+    "cgroup_total_periods": 39
+  },
+  "limits": {
+    "cpus": 0.1,
+    "memory_mib": 512
+  },
+  "image": "belot-ai01-neural-ai01"
+}

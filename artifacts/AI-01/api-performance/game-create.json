@@ -1,0 +1,53 @@
+{
+  "latency_ms": {
+    "game_create": {
+      "n": 20,
+      "median_ms": 1.17,
+      "p95_ms": 87.65,
+      "max_ms": 95.72
+    }
+  },
+  "samples_ms": [
+    87.64748199973837,
+    1.466465999783395,
+    4.532897999979468,
+    95.71902900006535,
+    1.5796449997651507,
+    1.2799400001313188,
+    1.1621019998528936,
+    1.0900020001827215,
+    1.1115319998680206,
+    1.1714749998645857,
+    0.9606030002942134,
+    1.0379229997852235,
+    1.0519039997234358,
+    86.51081499965585,
+    1.4440100003412226,
+    1.2084380000487727,
+    1.0950890000458458,
+    1.0671479999473377,
+    1.0038259997600107,
+    1.0421000001770153
+  ],
+  "phase": "game-create",
+  "wall_seconds": 0.29,
+  "resources": {
+    "docker_stats_sample_count": 0,
+    "sampled_peak_memory_mib": 0.0,
+    "sampled_peak_cpu_percent": 0,
+    "docker_stats_errors": [],
+    "cgroup_peak_memory_mib": 41.97,
+    "cgroup_memory_current_mib": 39.19,
+    "cgroup_cpu_seconds": 0.056,
+    "cgroup_cpu_cores_average": null,
+    "cgroup_cpu_average_note": "Not reported: the initial short-phase timer excluded part of cgroup snapshot overhead.",
+    "cgroup_throttled_usec": 458914,
+    "cgroup_throttled_periods": 6,
+    "cgroup_total_periods": 6
+  },
+  "limits": {
+    "cpus": 0.1,
+    "memory_mib": 512
+  },
+  "image": "belot-ai01-neural-ai01"
+}

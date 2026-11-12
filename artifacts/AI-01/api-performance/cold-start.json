@@ -1,0 +1,21 @@
+{
+  "phase": "cold-start",
+  "limits": {
+    "cpus": 0.1,
+    "memory_mib": 512
+  },
+  "image": "belot-ai01-neural-ai01",
+  "docker_start_to_game_created_ms": 5247.81,
+  "first_game_create_response_ms": 2757.28,
+  "first_neural_bid_response_ms": 499.84,
+  "first_bid_automatic_bot_bids": 3,
+  "first_bid_decision": "PlayCard",
+  "resources": {
+    "docker_stats_sample_count": 3,
+    "sampled_peak_memory_mib": 35.21,
+    "sampled_peak_cpu_percent": 10.12,
+    "docker_stats_errors": [],
+    "cgroup_peak_memory_mib": 38.75,
+    "cgroup_memory_current_mib": 36.14
+  }
+}
