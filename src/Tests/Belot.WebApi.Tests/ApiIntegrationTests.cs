@@ -3,13 +3,20 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 using Belot.AI.ClaudePlayer;
+using Belot.Engine.Players;
 
 using Xunit;
 
 public sealed class ApiIntegrationTests : IDisposable
 {
+    private static readonly JsonSerializerOptions ApiJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() },
+    };
+
     private readonly ApiFactory factory;
 
     private readonly HttpClient client;
@@ -46,12 +53,154 @@ public sealed class ApiIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task MultiplayerRoomsRequireValidJwtWhileSoloRoutesRemainUnauthenticated()
+    {
+        using var missingToken = await this.client.PostAsync("/api/multiplayer/rooms", content: null);
+        Assert.Equal(HttpStatusCode.Unauthorized, missingToken.StatusCode);
+
+        using var malformedTokenRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            "/api/multiplayer/rooms",
+            "not-a-jwt");
+        using var malformedToken = await this.client.SendAsync(malformedTokenRequest);
+        Assert.Equal(HttpStatusCode.Unauthorized, malformedToken.StatusCode);
+
+        using var wrongIssuerRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            "/api/multiplayer/rooms",
+            ApiFactory.CreateAccessToken(Guid.NewGuid().ToString(), issuer: "https://other.example/auth/v1"));
+        using var wrongIssuer = await this.client.SendAsync(wrongIssuerRequest);
+        Assert.Equal(HttpStatusCode.Unauthorized, wrongIssuer.StatusCode);
+
+        using var wrongAudienceRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            "/api/multiplayer/rooms",
+            ApiFactory.CreateAccessToken(Guid.NewGuid().ToString(), audience: "another-audience"));
+        using var wrongAudience = await this.client.SendAsync(wrongAudienceRequest);
+        Assert.Equal(HttpStatusCode.Unauthorized, wrongAudience.StatusCode);
+
+        using var expiredTokenRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            "/api/multiplayer/rooms",
+            ApiFactory.CreateAccessToken(Guid.NewGuid().ToString(), expires: DateTime.UtcNow.AddMinutes(-5)));
+        using var expiredToken = await this.client.SendAsync(expiredTokenRequest);
+        Assert.Equal(HttpStatusCode.Unauthorized, expiredToken.StatusCode);
+
+        using var validTokenRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            "/api/multiplayer/rooms",
+            ApiFactory.CreateAccessToken(Guid.NewGuid().ToString()));
+        using var validToken = await this.client.SendAsync(validTokenRequest);
+        Assert.Equal(HttpStatusCode.Created, validToken.StatusCode);
+
+        using var soloResponse = await this.client.PostAsJsonAsync("/api/games", new CreateGameRequest());
+        Assert.Equal(HttpStatusCode.Created, soloResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task MultiplayerRoomAssignmentKeepsAbsoluteSeatsTeamsAndUniqueOwnership()
+    {
+        var hostUserId = Guid.NewGuid().ToString();
+        using var createRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            "/api/multiplayer/rooms",
+            ApiFactory.CreateAccessToken(hostUserId));
+        using var createResponse = await this.client.SendAsync(createRequest);
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        var room = (await createResponse.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+
+        Assert.Equal(PlayerPosition.South, room.YourSeat);
+        Assert.Equal(
+            new[] { PlayerPosition.South, PlayerPosition.East, PlayerPosition.North, PlayerPosition.West },
+            room.Seats.Select(seat => seat.Seat));
+        Assert.Equal(
+            new[] { MultiplayerTeam.SouthNorth, MultiplayerTeam.EastWest, MultiplayerTeam.SouthNorth, MultiplayerTeam.EastWest },
+            room.Seats.Select(seat => seat.Team));
+        Assert.True(room.Seats[0].IsHost);
+
+        using var duplicateMembershipRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/rooms/{room.RoomId}/seats",
+            ApiFactory.CreateAccessToken(hostUserId));
+        duplicateMembershipRequest.Content = JsonContent.Create(new { seat = "North" });
+        using var duplicateMembership = await this.client.SendAsync(duplicateMembershipRequest);
+        Assert.Equal(HttpStatusCode.Conflict, duplicateMembership.StatusCode);
+
+        var joiningUserId = Guid.NewGuid().ToString();
+        using var joinRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/rooms/{room.RoomId}/seats",
+            ApiFactory.CreateAccessToken(joiningUserId));
+        joinRequest.Content = JsonContent.Create(new { seat = "East", userId = hostUserId });
+        using var joinResponse = await this.client.SendAsync(joinRequest);
+        Assert.Equal(HttpStatusCode.OK, joinResponse.StatusCode);
+        var joinedRoom = (await joinResponse.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+        Assert.Equal(PlayerPosition.East, joinedRoom.YourSeat);
+        Assert.True(joinedRoom.Seats[1].IsOccupied);
+
+        using var secondSeatRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/rooms/{room.RoomId}/seats",
+            ApiFactory.CreateAccessToken(joiningUserId));
+        secondSeatRequest.Content = JsonContent.Create(new { seat = "North" });
+        using var secondSeatResponse = await this.client.SendAsync(secondSeatRequest);
+        Assert.Equal(HttpStatusCode.Conflict, secondSeatResponse.StatusCode);
+
+        using var occupiedSeatRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/rooms/{room.RoomId}/seats",
+            ApiFactory.CreateAccessToken(Guid.NewGuid().ToString()));
+        occupiedSeatRequest.Content = JsonContent.Create(new { seat = "East" });
+        using var occupiedSeatResponse = await this.client.SendAsync(occupiedSeatRequest);
+        Assert.Equal(HttpStatusCode.Conflict, occupiedSeatResponse.StatusCode);
+
+        using var hostSeatRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/rooms/{room.RoomId}/seats",
+            ApiFactory.CreateAccessToken(Guid.NewGuid().ToString()));
+        hostSeatRequest.Content = JsonContent.Create(new { seat = "South" });
+        using var hostSeatResponse = await this.client.SendAsync(hostSeatRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, hostSeatResponse.StatusCode);
+
+        Assert.DoesNotContain(hostUserId, await createResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MultiplayerRoomReadRequiresMembership()
+    {
+        var hostUserId = Guid.NewGuid().ToString();
+        using var createRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            "/api/multiplayer/rooms",
+            ApiFactory.CreateAccessToken(hostUserId));
+        using var createResponse = await this.client.SendAsync(createRequest);
+        var room = (await createResponse.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+
+        using var unauthenticated = await this.client.GetAsync($"/api/multiplayer/rooms/{room.RoomId}");
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
+
+        using var nonMemberRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Get,
+            $"/api/multiplayer/rooms/{room.RoomId}",
+            ApiFactory.CreateAccessToken(Guid.NewGuid().ToString()));
+        using var nonMember = await this.client.SendAsync(nonMemberRequest);
+        Assert.Equal(HttpStatusCode.Forbidden, nonMember.StatusCode);
+
+        using var memberRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Get,
+            $"/api/multiplayer/rooms/{room.RoomId}",
+            ApiFactory.CreateAccessToken(hostUserId));
+        using var member = await this.client.SendAsync(memberRequest);
+        Assert.Equal(HttpStatusCode.OK, member.StatusCode);
+    }
+
+    [Fact]
     public async Task CorsAllowsConfiguredOriginsAndExpectedPreflightHeadersOnly()
     {
         using var preflight = new HttpRequestMessage(HttpMethod.Options, "/api/games");
         preflight.Headers.Add("Origin", "https://preview--belote-bridge-battle.lovable.app");
         preflight.Headers.Add("Access-Control-Request-Method", "POST");
-        preflight.Headers.Add("Access-Control-Request-Headers", "content-type, x-belot-debug-key");
+        preflight.Headers.Add("Access-Control-Request-Headers", "authorization, content-type, x-belot-debug-key");
 
         using var response = await this.client.SendAsync(preflight);
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
@@ -64,6 +213,7 @@ public sealed class ApiIntegrationTests : IDisposable
         Assert.Contains("OPTIONS", allowedMethods, StringComparison.OrdinalIgnoreCase);
         var allowedHeaders = response.Headers.GetValues("Access-Control-Allow-Headers").Single();
         Assert.Contains("content-type", allowedHeaders, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("authorization", allowedHeaders, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("x-belot-debug-key", allowedHeaders, StringComparison.OrdinalIgnoreCase);
 
         using var allowedRequest = new HttpRequestMessage(HttpMethod.Get, "/api/health");

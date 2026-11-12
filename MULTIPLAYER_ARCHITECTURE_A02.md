@@ -1,14 +1,21 @@
 # A02 — Multiplayer-Ready Player and Seat Architecture
 
-Status: architecture proposal; no multiplayer implementation is included in this change.
+Status: approved architecture baseline. A03 implements the authenticated identity and in-memory
+seat-ownership foundation; persistence, lobby lifecycle, and gameplay remain later work.
 
 ## Goals and boundaries
 
-- Keep the four engine seats fixed as `South`, `East`, `North`, `West`, in clockwise play order.
+- Keep the four engine seats fixed as `South`, `East`, `North`, `West`, in counterclockwise play order.
 - Keep the existing solo API contract and all five bot profile IDs (`random`, `beginner`,
   `skilled`, `expert`, `master`) unchanged.
 - Support multiplayer tables with two, three, or four authenticated human seats. Every unoccupied
   seat is filled by a configured bot before the first deal.
+- Assign the host to absolute South. Joining players choose an available absolute seat; partners
+  and opponents may both be human.
+- Use private invitation links/codes, not public matchmaking. The host may start with at least two
+  authenticated humans once every joined participant is ready; all other seats become bots.
+- A disconnect never transfers seat ownership. Abandoned games may initially be ended explicitly;
+  bot takeover is not part of this foundation.
 - Let each client render its authenticated player's seat at visual South, without changing the
   engine's absolute seats or team identities.
 - Keep the server authoritative: clients submit an intended action; the server decides whose turn
@@ -42,7 +49,7 @@ The current Web API is a solo adapter around this engine:
 
 Keep the solo routes, DTOs, default profiles, action behavior, and response semantics stable.
 Implement multiplayer as an additive API and UI path. Do not change bot profile implementations or
-the current production Master mapping as part of A02.
+the current production Master mapping as part of A02/A03.
 
 ## Proposed architecture
 
@@ -62,10 +69,11 @@ Lovable client
 ### Fixed engine seats, viewer-relative UI
 
 The server stores and emits only absolute engine seat identifiers. The client positions the
-authenticated seat at visual South, then rotates every other seat around the table. With clockwise
-absolute indices `South=0`, `East=1`, `North=2`, `West=3`, the visual index is
-`(absoluteIndex - viewerIndex + 4) % 4`, mapped back to the same clockwise names. Thus a viewer
-seated East sees East at the bottom, North on the right, West at the top, and South on the left.
+authenticated seat at visual South, then rotates every other seat around the table. With
+counterclockwise absolute indices `South=0`, `East=1`, `North=2`, `West=3`, the visual index is
+`(absoluteIndex - viewerIndex + 4) % 4`, with visual indices 0–3 denoting bottom, right, top, and
+left. Thus a viewer seated East sees East at the bottom, North on the right, West at the top, and
+South on the left.
 
 This is a presentation mapping only. Never rewrite a bid, card, team, score, or engine view to
 viewer-relative seat names. Team membership and scoring remain South-North versus East-West.
@@ -77,11 +85,12 @@ Represent every game with exactly four absolute seat records. A seat is either:
 - `Human`: owned by one authenticated Supabase user ID (`sub`), or
 - `Bot`: configured with one of the existing five profile IDs.
 
-Seat assignment is server-side and transactional. Enforce at most one human seat per user per
-game. Reject actions for bot seats and derive the acting seat from authenticated membership, never
-from a client-supplied seat or user ID. For multiplayer, accept two through four distinct human
-players; fill all remaining seats with their selected profiles before starting. Solo remains the
-existing one-human API path.
+Seat assignment is server-side and transactional. The host owns South; joining users may select
+any available absolute seat, including either a partner or opponent seat. Enforce at most one human
+seat per user per game. Reject actions for bot seats and derive the acting seat from authenticated
+membership, never from a client-supplied seat or user ID. Support two through four distinct human
+players; at start, fill all remaining seats with their selected profiles. Solo remains the existing
+one-human API path. The teams are always South-North and East-West.
 
 Suggested persistence records:
 
@@ -233,11 +242,12 @@ contract stable.
 
 ### Backend (`src/Belot.WebApi`)
 
-1. Add JWT bearer configuration for Supabase on multiplayer routes, including project issuer,
-   audience, JWKS validation, and integration tests. Keep auth optional only for the unchanged
-   solo routes.
-2. Add lobby/session/seat domain records, validation, repository interfaces, and SQL migrations for
-   membership, uniqueness constraints, lifecycle, revision, and event sequence.
+1. **A03:** Add configurable Supabase JWT bearer validation and protect only multiplayer routes.
+   Define identity, room membership, and absolute seat-ownership models and interfaces; enforce
+   server-authoritative unique membership/seat assignment. A03's in-memory repository is
+   single-process and is not durable.
+2. Add lobby/session/seat persistence and SQL uniqueness constraints for membership, lifecycle,
+   revision, and event sequence.
 3. Add a multiplayer coordinator that owns one `BelotMatch`, maps each absolute seat to either an
    authenticated human owner or an existing bot `IPlayer`, calls `GetView(seat)` only for the
    requesting owner, and serializes action processing.
@@ -282,51 +292,73 @@ frontend work begins.
 1. **Freeze compatibility contracts.** Capture current solo OpenAPI/JSON examples and add API
    regression tests for create, fetch, action, all five bot profiles, and public event ordering.
    No behavior changes.
-2. **Agree lobby and seat policy.** Decide seat selection, human team arrangement, bot fill
-   defaults, host/leave behavior, and whether a started game's human can be replaced by a bot.
-   Record these choices before database/API contracts are fixed.
-3. **Define identity boundary.** Configure Supabase project settings outside source control; add
+2. **Define identity boundary.** Configure Supabase project settings outside source control; add
    JWT validation and tests for valid, expired, wrong-issuer, and unauthenticated requests. Keep
    solo route tests proving current behavior.
-4. **Add lobby persistence and authorization.** Add migration/repository and atomic seat claim,
+3. **Add lobby persistence and authorization.** Add migration/repository and atomic seat claim,
    host start, duplicate-user prevention, and invitation/lobby access tests. Do not put match hands
    in browser-readable Supabase tables.
-5. **Add server-authoritative game coordinator.** Use fixed engine seats and per-seat views; add
+4. **Add server-authoritative game coordinator.** Use fixed engine seats and per-seat views; add
    two-, three-, and four-human integration tests, bot-fill tests, wrong-seat/illegal/stale/duplicate
    action tests, and hidden-hand leakage tests. The solo endpoints remain on their current path.
-6. **Choose and implement durability before scaling.** Design engine checkpoint/restore or exact
+5. **Choose and implement durability before scaling.** Design engine checkpoint/restore or exact
    replay, persist accepted actions and revisions, test process recovery, then enable multiple
    writers only with a distributed single-writer mechanism.
-7. **Add SignalR public updates.** Add authenticated membership checks, sequence numbering,
+6. **Add SignalR public updates.** Add authenticated membership checks, sequence numbering,
    disconnect/reconnect, stale-event recovery, and assertions that hub payloads never contain
    private hand/options/full records. Keep REST as command and snapshot authority.
-8. **Integrate Lovable UI.** Implement authenticated multiplayer lobby/table adapters and relative
+7. **Integrate Lovable UI.** Implement authenticated multiplayer lobby/table adapters and relative
    seat rotation in the separate multiplayer path; run the existing solo UI regression suite and
    browser checks for every viewer seat.
-9. **Operational readiness.** Configure production secrets, database migration process, rate
+8. **Operational readiness.** Configure production secrets, database migration process, rate
    limits per authenticated user, connection limits, observability/redaction, backups, and
    restart/recovery alerts. Deploy only after explicit approval and a staging soak.
 
-## Decisions required before implementation proceeds
+## Approved product decisions and A04 boundary
 
-The architecture can proceed with the recommendations above, but these product/operational
-choices affect lobby schema and API contracts and need confirmation:
+- The host is assigned absolute South. Joining authenticated users choose an available absolute
+  seat, and two humans may be partners or opponents. Teams stay South-North and East-West.
+- Two, three, or four human players are supported. The host may start when at least two
+  authenticated humans are present and all joined participants are ready; every unoccupied seat
+  becomes a bot at start.
+- Rooms are private and invitation-only; public matchmaking is out of scope. A disconnect never
+  transfers ownership. Initial abandoned games may be ended explicitly without bot takeover.
+- Full match recovery after process restart is a pre-launch requirement, not part of A03.
+- A03 provides configurable JWT validation and an in-memory room/seat-ownership contract only.
+  Production use still requires Supabase project configuration and durable persistence.
+- **Next: A04** should add the private invitation/join flow and durable Supabase Postgres
+  membership/seat repository with unique `(room_id, user_id)` and `(room_id, seat)` constraints,
+  plus readiness and host-start operations. Start must require at least two authenticated humans
+  and all joined members ready, then fill every vacant seat with its configured bot. A04 should
+  test the 2/3/4-human assignments and conflicts while preserving this A03 API/domain boundary.
 
-1. **Seat/team policy:** may players choose absolute seats and teams, or should the server assign
-   seats? Are two humans allowed to sit as partners, as opponents, or either? Recommendation:
-   allow explicit seat selection, require 2–4 distinct users, and permit any valid seat combination.
-2. **Lobby policy:** who may create/start a lobby, should it use an invite code, and when should
-   unfilled human seats become bots? Recommendation: authenticated host, unguessable invite code,
-   host starts after at least two humans join, and every remaining seat becomes its configured bot
-   at start.
-3. **Post-start disconnect/leave:** should a disconnected human seat wait indefinitely, time out to
-   a bot, or require host action? Recommendation: disconnect alone never changes ownership or
-   control; make bot takeover/forfeit an explicit, recorded policy decision.
-4. **Durability for first multiplayer release:** is recovery after an API restart a launch
-   requirement? Recommendation: yes before a public launch; otherwise clearly label an initial
-   staging pilot as single-instance and interrupt-on-restart until engine checkpoint/replay exists.
-5. **Lovable source access:** provide the frontend repository/workspace and staging Supabase project
-   configuration process before exact frontend file changes or auth verification are attempted.
+## A03 implementation record
 
-No implementation or deployment is authorized by this architecture step beyond creating this
-branch and recording the specification.
+- `src/Belot.WebApi/Program.cs` configures JWT bearer validation and a `sub`-claim authorization
+  policy; only `/api/multiplayer/**` uses that policy. Existing `/api/games/**` and solo bot routes
+  remain unchanged and unauthenticated.
+- `src/Belot.WebApi/MultiplayerRooms.cs` defines room, membership, seat, and fixed-team models;
+  repository, membership, and seat-assignment interfaces; authenticated identity resolution; and
+  an atomic, single-process in-memory implementation. The host owns South, and clients cannot set
+  owner IDs or team values.
+- `src/Belot.WebApi/MultiplayerRoomEndpoints.cs` adds authorized create, join-by-absolute-seat,
+  and member-only room-read endpoints. Responses expose seat occupancy and fixed teams, not user
+  IDs.
+- `src/Tests/Belot.WebApi.Tests/ApiFactory.cs` creates isolated RSA-signed test JWTs. The tests in
+  `src/Tests/Belot.WebApi.Tests/ApiIntegrationTests.cs` cover missing/malformed, expired, wrong
+  issuer, and valid tokens; unauthenticated solo use; host-South assignment; fixed seats/teams;
+  duplicate users, occupied/reserved seats, forged request user IDs, and member-only reads. The
+  existing full-match solo API test remains part of the same suite.
+- Runtime configuration is external to source: `Authentication:Supabase:Authority` (the project's
+  HTTPS Auth issuer, used for OIDC metadata and signing keys/JWKS), optional
+  `Authentication:Supabase:Issuer` (defaults to Authority), and
+  `Authentication:Supabase:Audience` (defaults to `authenticated`). No project URL, key, service
+  role credential, or production token is committed. Integration tests use only a generated local
+  RSA key. The frontend repository URL supplied for A03 returned GitHub 404 to anonymous access,
+  so the authentication implementation uses standard Supabase bearer-token validation without
+  reading or modifying that repository.
+- A03 does not include Postgres migrations/persistence, invitation lifecycle, readiness/start,
+  bot fill, match sessions/actions, SignalR, or process-restart recovery. The in-memory room store
+  is explicitly single-process and is not a production persistence boundary.
+
+This A03 change does not include or authorize deployment.

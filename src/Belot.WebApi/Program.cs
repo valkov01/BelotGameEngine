@@ -3,15 +3,48 @@ using System.Text;
 using System.Text.Json.Serialization;
 using System.Threading.RateLimiting;
 
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+
 using Belot.WebApi;
 
 var builder = WebApplication.CreateBuilder(args);
 var rateLimit = Math.Clamp(builder.Configuration.GetValue("RateLimit:PermitLimit", 120), 1, 10000);
 var rateWindowSeconds = Math.Clamp(builder.Configuration.GetValue("RateLimit:WindowSeconds", 60), 1, 3600);
+var supabaseAuthority = builder.Configuration["Authentication:Supabase:Authority"];
+var supabaseIssuer = builder.Configuration["Authentication:Supabase:Issuer"] ?? supabaseAuthority;
+var supabaseAudience = builder.Configuration["Authentication:Supabase:Audience"] ?? "authenticated";
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
+
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = string.IsNullOrWhiteSpace(supabaseAuthority) ? null : supabaseAuthority;
+        options.Audience = supabaseAudience;
+        options.MapInboundClaims = false;
+        options.RequireHttpsMetadata = true;
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = supabaseIssuer,
+            ValidateAudience = true,
+            ValidAudience = supabaseAudience,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ClockSkew = TimeSpan.FromSeconds(30),
+        };
+    });
+
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("Multiplayer", policy => policy
+        .RequireAuthenticatedUser()
+        .RequireClaim("sub"));
 });
 
 builder.Services.AddCors(options =>
@@ -24,7 +57,7 @@ builder.Services.AddCors(options =>
             policy
                 .WithOrigins(origins)
                 .WithMethods("GET", "POST", "OPTIONS")
-                .WithHeaders("Content-Type", "Accept", "X-Belot-Debug-Key");
+                .WithHeaders("Authorization", "Content-Type", "Accept", "X-Belot-Debug-Key");
         }
     });
 });
@@ -47,16 +80,23 @@ builder.Services.AddRateLimiter(options =>
 builder.Services.AddSingleton<GameStore>();
 builder.Services.AddSingleton<GameService>();
 builder.Services.AddSingleton<DebugHandsAccess>();
+builder.Services.AddSingleton<IMultiplayerRoomRepository, InMemoryMultiplayerRoomRepository>();
+builder.Services.AddSingleton<MultiplayerRoomService>();
+builder.Services.AddSingleton<IRoomMembershipService>(services => services.GetRequiredService<MultiplayerRoomService>());
+builder.Services.AddSingleton<ISeatAssignmentService>(services => services.GetRequiredService<MultiplayerRoomService>());
 
 var app = builder.Build();
 
 app.UseRouting();
 app.UseCors();
+app.UseAuthentication();
+app.UseAuthorization();
 app.UseRateLimiter();
 app.UseStaticFiles();
 
 app.MapGet("/api/health", () => Results.Ok(new HealthResponse("ok")));
 app.MapGet("/api/bots", () => Results.Ok(BotProfiles.All));
+app.MapMultiplayerRoomEndpoints();
 
 app.MapPost("/api/games", (CreateGameRequest request, GameService games) =>
 {
