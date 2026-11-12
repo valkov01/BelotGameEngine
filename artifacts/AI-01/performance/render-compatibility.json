@@ -1,0 +1,28 @@
+{
+  "docker_image": "belot-web-api:ai01",
+  "docker_build_succeeded": true,
+  "container_runtime": "mcr.microsoft.com/dotnet/aspnet:10.0",
+  "limits": {
+    "cpu": "0.1 CPU",
+    "memory": "512 MB"
+  },
+  "api_health": "ok",
+  "available_profiles_include_master": true,
+  "game_creation_succeeded": true,
+  "api_container_current_rss_mib": 37.42,
+  "neural_arena_smoke": {
+    "profiles": [
+      "heuristic-endgame",
+      "master"
+    ],
+    "seed_argument": 17002,
+    "pairs": 2,
+    "games": 4,
+    "docker_cpu_limit": "0.1 CPU",
+    "docker_memory_limit": "512 MB",
+    "wall_seconds": 63.19302129499965,
+    "cgroup_memory_peak_bytes": 175394816,
+    "return_code": 0,
+    "log": "/workspaces/BelotGameEngine/artifacts/AI-01/performance/render-free-smoke.log"
+  }
+}

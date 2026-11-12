@@ -1,0 +1,12 @@
+{
+  "profile": "master",
+  "bench_games": 20,
+  "warmup_games": 20,
+  "wall_seconds": 145.51549938499988,
+  "user_cpu_seconds": 144.481269,
+  "system_cpu_seconds": 0.144699,
+  "cpu_percent_of_one_core": 99.38870334173379,
+  "max_rss_mb": 62.66796875,
+  "return_code": 0,
+  "timing_output": "timing master: 20 games, 5705 decisions (1332 bids, 170 announces, 4203 card callbacks) in 00:01:13.4509061\ndecision ms: mean=12.869, p50=4.590, p95=40.615, p99=42.204, p99.9=45.941, max=65.300\ncard ms: mean=17.466, p50=19.688, p95=40.927, p99=42.491, p99.9=45.976, max=65.300, over 8 ms=2686, over 10 ms=2592\n"
+}

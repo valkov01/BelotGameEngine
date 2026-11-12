@@ -235,8 +235,8 @@
                 + $"{ticks * 1_000_000.0 / Stopwatch.Frequency / decisions:0.0} µs per card through the engine ({games} games, warmup excluded)");
         }
 
-        // The time of any catalog player's card decisions: four of it in whole games on one thread
-        // (twenty warmup games excluded); every card callback counts, a forced card included.
+        // The time of any catalog player's decisions: four of it in whole games on one thread
+        // (twenty warmup games excluded).
         private static void Timing(TrainingSettings settings)
         {
             var factory = OpponentCatalog.Factory(settings.Player, NeuralModels.Embedded);
@@ -255,10 +255,12 @@
             }
 
             var samples = timed.SelectMany(x => x.DecisionTicks).Order().ToArray();
+            var allDecisions = timed.SelectMany(x => x.AllDecisionTicks).Order().ToArray();
             double Millis(long value) => value * 1000.0 / Stopwatch.Frequency;
-            double Percentile(double quantile) => Millis(samples[(int)Math.Ceiling(quantile * samples.Length) - 1]);
-            Console.WriteLine($"timing {settings.Player}: {games} games, {samples.Length} card callbacks in {clock.Elapsed}");
-            Console.WriteLine($"card ms: mean={samples.Average(x => Millis(x)):0.000}, p50={Percentile(.5):0.000}, p95={Percentile(.95):0.000}, p99={Percentile(.99):0.000}, p99.9={Percentile(.999):0.000}, max={Millis(samples[^1]):0.000}, over 8 ms={samples.Count(x => Millis(x) > 8)}, over 10 ms={samples.Count(x => Millis(x) > 10)}");
+            double Percentile(long[] values, double quantile) => Millis(values[(int)Math.Ceiling(quantile * values.Length) - 1]);
+            Console.WriteLine($"timing {settings.Player}: {games} games, {allDecisions.Length} decisions ({timed.Sum(x => x.BidDecisionTicks.Count)} bids, {timed.Sum(x => x.AnnounceDecisionTicks.Count)} announces, {samples.Length} card callbacks) in {clock.Elapsed}");
+            Console.WriteLine($"decision ms: mean={allDecisions.Average(x => Millis(x)):0.000}, p50={Percentile(allDecisions, .5):0.000}, p95={Percentile(allDecisions, .95):0.000}, p99={Percentile(allDecisions, .99):0.000}, p99.9={Percentile(allDecisions, .999):0.000}, max={Millis(allDecisions[^1]):0.000}");
+            Console.WriteLine($"card ms: mean={samples.Average(x => Millis(x)):0.000}, p50={Percentile(samples, .5):0.000}, p95={Percentile(samples, .95):0.000}, p99={Percentile(samples, .99):0.000}, p99.9={Percentile(samples, .999):0.000}, max={Millis(samples[^1]):0.000}, over 8 ms={samples.Count(x => Millis(x) > 8)}, over 10 ms={samples.Count(x => Millis(x) > 10)}");
         }
 
         // The time of a decision: whole self-play deals with the networks, no labels.

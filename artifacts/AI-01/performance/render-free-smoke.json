@@ -1,0 +1,15 @@
+{
+  "profiles": [
+    "heuristic-endgame",
+    "master"
+  ],
+  "seed_argument": 17002,
+  "pairs": 2,
+  "games": 4,
+  "docker_cpu_limit": "0.1 CPU",
+  "docker_memory_limit": "512 MB",
+  "wall_seconds": 63.19302129499965,
+  "cgroup_memory_peak_bytes": 175394816,
+  "return_code": 0,
+  "log": "/workspaces/BelotGameEngine/artifacts/AI-01/performance/render-free-smoke.log"
+}

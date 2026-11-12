@@ -1,0 +1,12 @@
+{
+  "profile": "heuristic-endgame",
+  "bench_games": 20,
+  "warmup_games": 20,
+  "wall_seconds": 13.5870481070001,
+  "user_cpu_seconds": 13.747847,
+  "system_cpu_seconds": 0.058899999999999994,
+  "cpu_percent_of_one_core": 101.61697295298977,
+  "max_rss_mb": 59.45703125,
+  "return_code": 0,
+  "timing_output": "timing heuristic-endgame: 20 games, 6369 decisions (1482 bids, 182 announces, 4705 card callbacks) in 00:00:06.3571932\ndecision ms: mean=0.995, p50=0.002, p95=5.078, p99=6.978, p99.9=8.016, max=9.814\ncard ms: mean=1.347, p50=0.013, p95=5.162, p99=7.917, p99.9=8.019, max=9.814, over 8 ms=45, over 10 ms=0\n"
+}
