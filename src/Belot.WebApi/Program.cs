@@ -97,6 +97,7 @@ builder.Services.AddRateLimiter(options =>
 builder.Services.AddSingleton<GameStore>();
 builder.Services.AddSingleton<GameService>();
 builder.Services.AddSingleton<DebugHandsAccess>();
+builder.Services.AddSingleton<MultiplayerGameStore>();
 if (string.IsNullOrWhiteSpace(postgresConnectionString))
 {
     builder.Services.AddSingleton<IMultiplayerRoomRepository, InMemoryMultiplayerRoomRepository>();
@@ -110,6 +111,7 @@ else
 builder.Services.AddSingleton<MultiplayerRoomService>();
 builder.Services.AddSingleton<IRoomMembershipService>(services => services.GetRequiredService<MultiplayerRoomService>());
 builder.Services.AddSingleton<ISeatAssignmentService>(services => services.GetRequiredService<MultiplayerRoomService>());
+builder.Services.AddSingleton<IMultiplayerGameService, MultiplayerGameService>();
 
 var app = builder.Build();
 

@@ -41,3 +41,18 @@ Content-Type: application/json
 ### Host only; requires two or more human members and all members ready
 POST {{baseUrl}}/api/multiplayer/lobbies/{{lobbyId}}/start
 Authorization: Bearer {{accessToken}}
+
+### Read the private snapshot for the authenticated seat (game ID is the lobby ID)
+GET {{baseUrl}}/api/multiplayer/games/{{lobbyId}}
+Authorization: Bearer {{accessToken}}
+
+### Submit an action using the snapshot's revision and a stable retry key
+POST {{baseUrl}}/api/multiplayer/games/{{lobbyId}}/actions
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "expectedRevision": 0,
+  "idempotencyKey": "replace-with-a-unique-client-generated-key",
+  "bid": "Pass"
+}

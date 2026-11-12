@@ -14,6 +14,7 @@ public enum MultiplayerTeam
 public enum MultiplayerRoomStatus
 {
     WaitingForPlayers,
+    Starting,
     Started,
 }
 
@@ -67,6 +68,7 @@ public sealed record MultiplayerRoomDto(
     PlayerPosition YourSeat,
     int HumanPlayerCount,
     int MaximumHumanPlayers,
+    bool IsGameAvailable,
     IReadOnlyList<MultiplayerSeatDto> Seats);
 
 /// <summary>Configuration for a private multiplayer lobby.</summary>
@@ -85,7 +87,7 @@ public sealed record CreateMultiplayerRoomRequest
     public string WestBot { get; init; } = "skilled";
 }
 
-/// <summary>The created lobby and its one-time invitation secret.</summary>
+/// <summary>The created lobby and its invitation secret, disclosed only at creation.</summary>
 public sealed record CreateMultiplayerRoomResponse(MultiplayerRoomDto Room, string InvitationCode);
 
 /// <summary>Invitation secret and absolute seat requested by a joining player.</summary>
@@ -155,7 +157,12 @@ public interface IMultiplayerRoomRepository
         bool isReady,
         CancellationToken cancellationToken);
 
-    ValueTask<MultiplayerRoomRepositoryResult> StartAsync(
+    ValueTask<MultiplayerRoomRepositoryResult> BeginStartAsync(
+        string roomId,
+        string userId,
+        CancellationToken cancellationToken);
+
+    ValueTask<MultiplayerRoomRepositoryResult> CompleteStartAsync(
         string roomId,
         string userId,
         CancellationToken cancellationToken);
@@ -188,10 +195,6 @@ public interface ISeatAssignmentService
         bool isReady,
         CancellationToken cancellationToken);
 
-    ValueTask<MultiplayerRoomServiceResult> StartAsync(
-        ClaimsPrincipal caller,
-        string roomId,
-        CancellationToken cancellationToken);
 }
 
 internal sealed class InMemoryMultiplayerRoomRepository : IMultiplayerRoomRepository
@@ -373,7 +376,7 @@ internal sealed class InMemoryMultiplayerRoomRepository : IMultiplayerRoomReposi
         }
     }
 
-    public ValueTask<MultiplayerRoomRepositoryResult> StartAsync(
+    public ValueTask<MultiplayerRoomRepositoryResult> BeginStartAsync(
         string roomId,
         string userId,
         CancellationToken cancellationToken)
@@ -386,14 +389,19 @@ internal sealed class InMemoryMultiplayerRoomRepository : IMultiplayerRoomReposi
                 return ValueTask.FromResult(new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.NotFound));
             }
 
-            if (room.Status != MultiplayerRoomStatus.WaitingForPlayers)
+            if (!string.Equals(room.HostUserId, userId, StringComparison.Ordinal))
+            {
+                return ValueTask.FromResult(new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.NotHost));
+            }
+
+            if (room.Status == MultiplayerRoomStatus.Started)
             {
                 return ValueTask.FromResult(new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.LobbyClosed));
             }
 
-            if (!string.Equals(room.HostUserId, userId, StringComparison.Ordinal))
+            if (room.Status == MultiplayerRoomStatus.Starting)
             {
-                return ValueTask.FromResult(new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.NotHost));
+                return ValueTask.FromResult(new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.Success, room));
             }
 
             if (room.Members.Count < 2)
@@ -411,11 +419,40 @@ internal sealed class InMemoryMultiplayerRoomRepository : IMultiplayerRoomReposi
                     ? seat with { BotProfileId = room.BotProfiles[seat.Position.ToString()] }
                     : seat)
                 .ToArray();
-            var startedRoom = room with
+            var startingRoom = room with
             {
-                Status = MultiplayerRoomStatus.Started,
+                Status = MultiplayerRoomStatus.Starting,
                 Seats = Array.AsReadOnly(seats),
             };
+            this.rooms[roomId] = startingRoom;
+            return ValueTask.FromResult(new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.Success, startingRoom));
+        }
+    }
+
+    public ValueTask<MultiplayerRoomRepositoryResult> CompleteStartAsync(
+        string roomId,
+        string userId,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (this.sync)
+        {
+            if (!this.rooms.TryGetValue(roomId, out var room))
+            {
+                return ValueTask.FromResult(new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.NotFound));
+            }
+
+            if (!string.Equals(room.HostUserId, userId, StringComparison.Ordinal))
+            {
+                return ValueTask.FromResult(new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.NotHost));
+            }
+
+            if (room.Status != MultiplayerRoomStatus.Starting)
+            {
+                return ValueTask.FromResult(new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.LobbyClosed));
+            }
+
+            var startedRoom = room with { Status = MultiplayerRoomStatus.Started };
             this.rooms[roomId] = startedRoom;
             return ValueTask.FromResult(new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.Success, startedRoom));
         }
@@ -534,19 +571,6 @@ internal sealed class MultiplayerRoomService : IRoomMembershipService, ISeatAssi
         return MapRepositoryResult(await this.repository.SetReadyAsync(roomId, userId, isReady, cancellationToken));
     }
 
-    public async ValueTask<MultiplayerRoomServiceResult> StartAsync(
-        ClaimsPrincipal caller,
-        string roomId,
-        CancellationToken cancellationToken)
-    {
-        if (!TryGetUserId(caller, out var userId))
-        {
-            return new MultiplayerRoomServiceResult(MultiplayerRoomServiceStatus.Unauthorized);
-        }
-
-        return MapRepositoryResult(await this.repository.StartAsync(roomId, userId, cancellationToken));
-    }
-
     private static MultiplayerRoomServiceResult MapRepositoryResult(MultiplayerRoomRepositoryResult result) =>
         result.Status switch
         {
@@ -596,7 +620,7 @@ internal sealed class MultiplayerRoomService : IRoomMembershipService, ISeatAssi
 
 internal static class MultiplayerRoomMapper
 {
-    public static MultiplayerRoomDto ToDto(MultiplayerRoom room, string userId)
+    public static MultiplayerRoomDto ToDto(MultiplayerRoom room, string userId, bool isGameAvailable = false)
     {
         var membership = room.Members.Single(member => string.Equals(member.UserId, userId, StringComparison.Ordinal));
         var seats = room.Seats
@@ -617,6 +641,7 @@ internal static class MultiplayerRoomMapper
             membership.Seat,
             room.Members.Count,
             room.MaximumHumanPlayers,
+            isGameAvailable,
             seats);
     }
 }

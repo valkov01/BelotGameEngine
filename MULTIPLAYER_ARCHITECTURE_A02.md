@@ -327,7 +327,7 @@ frontend work begins.
 - A03 provides configurable JWT validation and an in-memory room/seat-ownership contract only.
   Production use still requires Supabase project configuration and durable persistence.
 - **A04 implementation:** `src/Belot.WebApi/MultiplayerRooms.cs` now adds lobby configuration,
-  one-time invitation codes, member readiness and host-only start. `POST
+  reusable invitation codes (returned only at room creation), member readiness and host-only start. `POST
   /api/multiplayer/lobbies` returns the invitation secret once; only its SHA-256 hash is stored.
   Joining requires both that secret and an available absolute seat. A host starts with at least two
   human members and all joined members ready; the operation assigns configured bots to every
@@ -363,6 +363,39 @@ frontend work begins.
   reads, readiness reversal, host-only start, maximum capacity, concurrent claims, bot fill, and
   two/three/four human seats. Gameplay actions, SignalR, the Lovable UI, process-restart recovery,
   migrations against a remote database and deployment remain out of scope.
+
+## A05 server-authoritative gameplay implementation
+
+- `POST /api/multiplayer/lobbies/{roomId}/start` now begins a match initialization phase, creates
+  and starts one `BelotMatch` with the room's fixed South/East/North/West ownership and configured
+  bots, then marks the lobby `Started`. A start response is successful only after the active match
+  has been registered. The host remains South and the engine's existing South, East, North, West
+  turn order, action validation and scoring are unchanged.
+- The new authenticated `GET /api/multiplayer/games/{gameId}` and
+  `POST /api/multiplayer/games/{gameId}/actions` routes use the room ID as game ID. Membership is
+  resolved from the validated JWT `sub`; no request seat or user ID is trusted. Snapshots call
+  `BelotMatch.GetView(authenticatedSeat)` and include only that seat's hand and options. Public
+  action events use the existing `GameEventProjector`; bot seats use the existing five `BotProfiles`
+  and act automatically until a human turn or match end.
+- Each active match is serialized with a per-match gate. Commands carry `expectedRevision` and an
+  `idempotencyKey`; accepted human actions advance one revision, exact retries return their cached
+  response, and stale or conflicting requests return HTTP 409 without replaying a move. Lobby
+  status `Starting` is a non-playable initialization state. Migration
+  `src/Belot.WebApi/Migrations/002_multiplayer_starting.sql` adds it to the existing status check;
+  no database migration was run remotely.
+- Active `BelotMatch` instances and idempotency results remain process-local. A same-process
+  reconnect reads the current seat snapshot. After a restart, a persisted `Started` room with no
+  in-memory match reports `isGameAvailable: false`; game reads/actions return HTTP 410 Gone rather
+  than implying the match can resume. A room left in `Starting` can be initialized again by its
+  host. Do not horizontally scale or claim recovery until shared match persistence/single-writer
+  coordination is implemented. Migration 002 and the API deployment configuration require review
+  and explicit application; this work did not connect to or alter a remote Supabase project.
+- A05 integration coverage exercises two humans as partners and opponents, three humans plus a bot,
+  four human private snapshots and a complete four-human match, public turn/scoring results,
+  unauthorized/non-member/wrong-seat/illegal/stale/duplicate actions, concurrent idempotent retry,
+  and the missing-process-local-match restart signal. Solo routes and their existing test contract
+  are unchanged. SignalR, full game-state persistence/recovery, multi-instance execution and the
+  Lovable UI remain out of scope.
 
 ## A03 implementation record
 

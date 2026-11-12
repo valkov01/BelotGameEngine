@@ -207,7 +207,7 @@ internal sealed class PostgresMultiplayerRoomRepository : IMultiplayerRoomReposi
             await this.FindAsync(roomId, cancellationToken));
     }
 
-    public async ValueTask<MultiplayerRoomRepositoryResult> StartAsync(
+    public async ValueTask<MultiplayerRoomRepositoryResult> BeginStartAsync(
         string roomId,
         string userId,
         CancellationToken cancellationToken)
@@ -220,14 +220,22 @@ internal sealed class PostgresMultiplayerRoomRepository : IMultiplayerRoomReposi
             return new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.NotFound);
         }
 
-        if (roomRow.Value.Status != MultiplayerRoomStatus.WaitingForPlayers)
+        if (!string.Equals(roomRow.Value.HostUserId, userId, StringComparison.Ordinal))
+        {
+            return new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.NotHost);
+        }
+
+        if (roomRow.Value.Status == MultiplayerRoomStatus.Started)
         {
             return new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.LobbyClosed);
         }
 
-        if (!string.Equals(roomRow.Value.HostUserId, userId, StringComparison.Ordinal))
+        if (roomRow.Value.Status == MultiplayerRoomStatus.Starting)
         {
-            return new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.NotHost);
+            await transaction.CommitAsync(cancellationToken);
+            return new MultiplayerRoomRepositoryResult(
+                MultiplayerRoomRepositoryStatus.Success,
+                await this.FindAsync(roomId, cancellationToken));
         }
 
         await using (var membersCommand = new NpgsqlCommand(
@@ -270,12 +278,53 @@ internal sealed class PostgresMultiplayerRoomRepository : IMultiplayerRoomReposi
         }
 
         await using (var updateStatusCommand = new NpgsqlCommand(
-            "UPDATE multiplayer_rooms SET status = 'Started' WHERE room_id = @room_id;",
+            "UPDATE multiplayer_rooms SET status = 'Starting' WHERE room_id = @room_id;",
             connection,
             transaction))
         {
             updateStatusCommand.Parameters.AddWithValue("room_id", roomId);
             await updateStatusCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return new MultiplayerRoomRepositoryResult(
+            MultiplayerRoomRepositoryStatus.Success,
+            await this.FindAsync(roomId, cancellationToken));
+    }
+
+    public async ValueTask<MultiplayerRoomRepositoryResult> CompleteStartAsync(
+        string roomId,
+        string userId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await this.dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var roomRow = await LockRoomAsync(connection, transaction, roomId, cancellationToken);
+        if (roomRow is null)
+        {
+            return new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.NotFound);
+        }
+
+        if (!string.Equals(roomRow.Value.HostUserId, userId, StringComparison.Ordinal))
+        {
+            return new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.NotHost);
+        }
+
+        if (roomRow.Value.Status != MultiplayerRoomStatus.Starting)
+        {
+            return new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.LobbyClosed);
+        }
+
+        await using (var updateStatusCommand = new NpgsqlCommand(
+            "UPDATE multiplayer_rooms SET status = 'Started' WHERE room_id = @room_id AND status = 'Starting';",
+            connection,
+            transaction))
+        {
+            updateStatusCommand.Parameters.AddWithValue("room_id", roomId);
+            if (await updateStatusCommand.ExecuteNonQueryAsync(cancellationToken) != 1)
+            {
+                return new MultiplayerRoomRepositoryResult(MultiplayerRoomRepositoryStatus.LobbyClosed);
+            }
         }
 
         await transaction.CommitAsync(cancellationToken);

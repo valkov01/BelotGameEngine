@@ -241,7 +241,13 @@ internal sealed class GameService
                 }
 
                 var botAfter = match.GetView(PlayerPosition.South);
-                events.AddRange(GameEventProjector.Project(botBefore, botAfter, seat, botAction, events.Count));
+                events.AddRange(GameEventProjector.Project(
+                    botBefore,
+                    botAfter,
+                    seat,
+                    botAction,
+                    events.Count,
+                    actorIsAutomatic: true));
             }
 
             return new GameActionResult(
@@ -254,7 +260,7 @@ internal sealed class GameService
         }
     }
 
-    private static bool TryBuildAction(BelotSeatView view, GameActionRequest request, out BelotAction action, out string error)
+    internal static bool TryBuildAction(BelotSeatView view, GameActionRequest request, out BelotAction action, out string error)
     {
         action = null!;
         error = "Action does not match the current decision.";

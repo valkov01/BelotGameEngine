@@ -11,7 +11,8 @@ internal static class GameEventProjector
         BelotSeatView after,
         PlayerPosition actor,
         BelotAction action,
-        int firstSequence)
+        int firstSequence,
+        bool actorIsAutomatic = false)
     {
         var events = new List<PublicGameEventDto>();
         var roundEnded = after.PreviousRounds.Count > before.PreviousRounds.Count;
@@ -42,7 +43,7 @@ internal static class GameEventProjector
                 bid.Type.ToString(),
                 contractSeat == PlayerPosition.Unknown ? null : contractSeat.ToString(),
                 contract.ToString(),
-                actor != PlayerPosition.South || index != before.Bids.Count || action.Type != BelotActionType.Bid));
+                actorIsAutomatic || index != before.Bids.Count || action.Type != BelotActionType.Bid));
         }
 
         var resultingContract = ended?.Contract ?? after.Contract;
@@ -69,7 +70,7 @@ internal static class GameEventProjector
                 "declarations",
                 roundNumber,
                 actor.ToString(),
-                Automatic: actor != PlayerPosition.South,
+                Automatic: actorIsAutomatic,
                 Announces: declared));
         }
 
@@ -81,7 +82,7 @@ internal static class GameEventProjector
         for (var index = cardsPlayed; index < newCards.Length; index++)
         {
             var card = newCards[index];
-            var automatic = actor != PlayerPosition.South || index != cardsPlayed || action.Type != BelotActionType.PlayCard;
+            var automatic = actorIsAutomatic || index != cardsPlayed || action.Type != BelotActionType.PlayCard;
             events.Add(new PublicGameEventDto(
                 firstSequence + events.Count,
                 "card",
