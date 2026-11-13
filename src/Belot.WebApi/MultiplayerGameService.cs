@@ -7,6 +7,9 @@ using System.Text.Json;
 using Belot.Engine.GameMechanics;
 using Belot.Engine.Players;
 
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+
 /// <summary>A private multiplayer game snapshot scoped to one authenticated seat.</summary>
 public sealed record MultiplayerGameSnapshotDto(
     string GameId,
@@ -63,6 +66,7 @@ internal enum MultiplayerGameServiceStatus
     InvalidRequest,
     Conflict,
     Gone,
+    Unavailable,
 }
 
 internal sealed record MultiplayerGameServiceResult(
@@ -98,14 +102,83 @@ internal sealed class MultiplayerGameStore
 {
     private readonly ConcurrentDictionary<string, ActiveMultiplayerGame> games = new(StringComparer.Ordinal);
 
-    public ActiveMultiplayerGame? Find(string gameId) =>
-        this.games.TryGetValue(gameId, out var game) ? game : null;
+    private readonly object sync = new();
 
-    public bool TryAdd(ActiveMultiplayerGame game) => this.games.TryAdd(game.GameId, game);
+    private readonly int maximumGames;
 
-    public bool Remove(string gameId, ActiveMultiplayerGame game) =>
-        ((ICollection<KeyValuePair<string, ActiveMultiplayerGame>>)this.games)
-            .Remove(new KeyValuePair<string, ActiveMultiplayerGame>(gameId, game));
+    private readonly TimeSpan completedRetention;
+
+    public MultiplayerGameStore(IConfiguration configuration)
+    {
+        this.maximumGames = Math.Clamp(configuration.GetValue("Multiplayer:Games:MaximumActive", 200), 1, 10000);
+        var retentionMinutes = Math.Clamp(
+            configuration.GetValue("Multiplayer:Games:CompletedRetentionMinutes", 60),
+            1,
+            10080);
+        this.completedRetention = TimeSpan.FromMinutes(retentionMinutes);
+    }
+
+    public bool HasCapacity
+    {
+        get
+        {
+            lock (this.sync)
+            {
+                this.RemoveExpiredCompletedGames();
+                return this.games.Count < this.maximumGames;
+            }
+        }
+    }
+
+    public ActiveMultiplayerGame? Find(string gameId)
+    {
+        lock (this.sync)
+        {
+            this.RemoveExpiredCompletedGames();
+            return this.games.TryGetValue(gameId, out var game) ? game : null;
+        }
+    }
+
+    public bool TryAdd(ActiveMultiplayerGame game)
+    {
+        lock (this.sync)
+        {
+            this.RemoveExpiredCompletedGames();
+            return this.games.Count < this.maximumGames && this.games.TryAdd(game.GameId, game);
+        }
+    }
+
+    public bool Remove(string gameId, ActiveMultiplayerGame game)
+    {
+        lock (this.sync)
+        {
+            return ((ICollection<KeyValuePair<string, ActiveMultiplayerGame>>)this.games)
+                .Remove(new KeyValuePair<string, ActiveMultiplayerGame>(gameId, game));
+        }
+    }
+
+    private void RemoveExpiredCompletedGames()
+    {
+        this.RemoveExpiredCompletedGames(DateTimeOffset.UtcNow);
+    }
+
+    internal void RemoveExpiredCompletedGames(DateTimeOffset now)
+    {
+        lock (this.sync)
+        {
+            var nowMilliseconds = now.ToUnixTimeMilliseconds();
+            foreach (var (gameId, game) in this.games)
+            {
+                var completedAt = game.CompletedAtUnixMilliseconds;
+                if (completedAt > 0
+                    && nowMilliseconds - completedAt >= this.completedRetention.TotalMilliseconds)
+                {
+                    ((ICollection<KeyValuePair<string, ActiveMultiplayerGame>>)this.games)
+                        .Remove(new KeyValuePair<string, ActiveMultiplayerGame>(gameId, game));
+                }
+            }
+        }
+    }
 }
 
 internal sealed class ActiveMultiplayerGame
@@ -139,12 +212,32 @@ internal sealed class ActiveMultiplayerGame
     public long Revision { get; set; }
 
     public Dictionary<string, IdempotencyRecord> IdempotencyRecords { get; } = new(StringComparer.Ordinal);
+
+    private long completedAtUnixMilliseconds;
+
+    public long CompletedAtUnixMilliseconds => Interlocked.Read(ref this.completedAtUnixMilliseconds);
+
+    public void MarkCompleted() =>
+        Interlocked.CompareExchange(
+            ref this.completedAtUnixMilliseconds,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            0);
 }
 
-internal sealed record IdempotencyRecord(
-    string UserId,
-    string Fingerprint,
-    MultiplayerGameActionResponse Response);
+internal sealed class IdempotencyRecord(
+    string userId,
+    string fingerprint,
+    MultiplayerGameActionResponse response,
+    bool automationPending)
+{
+    public string UserId { get; } = userId;
+
+    public string Fingerprint { get; } = fingerprint;
+
+    public MultiplayerGameActionResponse Response { get; set; } = response;
+
+    public bool AutomationPending { get; set; } = automationPending;
+}
 
 internal sealed class MultiplayerGameService : IMultiplayerGameService
 {
@@ -152,12 +245,18 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
 
     private readonly MultiplayerGameStore games;
 
+    private readonly ILogger<MultiplayerGameService> logger;
+
     private readonly SemaphoreSlim startGate = new(1, 1);
 
-    public MultiplayerGameService(IMultiplayerRoomRepository rooms, MultiplayerGameStore games)
+    public MultiplayerGameService(
+        IMultiplayerRoomRepository rooms,
+        MultiplayerGameStore games,
+        ILogger<MultiplayerGameService> logger)
     {
         this.rooms = rooms;
         this.games = games;
+        this.logger = logger;
     }
 
     public bool IsGameAvailable(string roomId) => this.games.Find(roomId) is not null;
@@ -195,6 +294,13 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
                         Error: "The lobby started in an earlier process, but its in-memory match is unavailable.");
             }
 
+            if (this.games.Find(roomId) is null && !this.games.HasCapacity)
+            {
+                return new MultiplayerGameServiceResult(
+                    MultiplayerGameServiceStatus.Unavailable,
+                    Error: "The multiplayer game capacity has been reached. Try again after a completed game expires.");
+            }
+
             var begin = await this.rooms.BeginStartAsync(roomId, userId, cancellationToken);
             if (begin.Status != MultiplayerRoomRepositoryStatus.Success || begin.Room is null)
             {
@@ -216,8 +322,8 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
             if (activeGame is null)
             {
                 return new MultiplayerGameServiceResult(
-                    MultiplayerGameServiceStatus.Conflict,
-                    Error: "Another start attempt is initializing this match.");
+                    MultiplayerGameServiceStatus.Unavailable,
+                    Error: "The multiplayer game capacity has been reached. Try again after a completed game expires.");
             }
 
             var complete = await this.rooms.CompleteStartAsync(roomId, userId, cancellationToken);
@@ -326,15 +432,20 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
             var fingerprint = JsonSerializer.Serialize(request);
             if (game.IdempotencyRecords.TryGetValue(request.IdempotencyKey, out var previous))
             {
-                return string.Equals(previous.UserId, userId, StringComparison.Ordinal)
-                    && string.Equals(previous.Fingerprint, fingerprint, StringComparison.Ordinal)
-                    ? new MultiplayerGameServiceResult(
-                        MultiplayerGameServiceStatus.Success,
-                        ActionResponse: previous.Response)
-                    : new MultiplayerGameServiceResult(
+                if (!string.Equals(previous.UserId, userId, StringComparison.Ordinal)
+                    || !string.Equals(previous.Fingerprint, fingerprint, StringComparison.Ordinal))
+                {
+                    return new MultiplayerGameServiceResult(
                         MultiplayerGameServiceStatus.Conflict,
                         CurrentRevision: game.Revision,
                         Error: "The idempotency key was already used for a different action.");
+                }
+
+                return previous.AutomationPending
+                    ? this.ContinueAutomaticMoves(game, membership.Seat, previous)
+                    : new MultiplayerGameServiceResult(
+                        MultiplayerGameServiceStatus.Success,
+                        ActionResponse: previous.Response);
             }
 
             if (request.ExpectedRevision != game.Revision)
@@ -380,7 +491,6 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
                     Error: validation.ToString());
             }
 
-            var events = new List<PublicGameEventDto>();
             var actResult = match.Act(membership.Seat, action);
             if (actResult != BelotActResult.Ok)
             {
@@ -390,48 +500,122 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
                     Error: actResult.ToString());
             }
 
+            game.Revision++;
+            var accepted = new IdempotencyRecord(
+                userId,
+                fingerprint,
+                new MultiplayerGameActionResponse(
+                    game.Revision,
+                    membership.Seat,
+                    ApiMapper.ToState(game.GameId, game.Bots, match.GetView(membership.Seat)),
+                    Array.Empty<PublicGameEventDto>()),
+                !match.IsFinished && game.Players[match.ToMove.Index()] is not null);
+            game.IdempotencyRecords.Add(request.IdempotencyKey, accepted);
+
             var after = match.GetView(membership.Seat);
-            events.AddRange(GameEventProjector.Project(before, after, membership.Seat, action, events.Count));
-
-            while (!match.IsFinished && game.Players[match.ToMove.Index()] is { } bot)
+            var events = GameEventProjector.Project(before, after, membership.Seat, action, 0).ToList();
+            accepted.Response = CreateActionResponse(game, membership.Seat, events);
+            if (match.IsFinished)
             {
-                var botSeat = match.ToMove;
-                var botBefore = match.GetView(botSeat);
-                var botAction = bot.Decide(botBefore);
-                var botResult = match.Act(botSeat, botAction);
-                if (botResult != BelotActResult.Ok)
-                {
-                    throw new InvalidOperationException($"Bot action was rejected: {botResult}.");
-                }
-
-                var botAfter = match.GetView(botSeat);
-                events.AddRange(GameEventProjector.Project(
-                    botBefore,
-                    botAfter,
-                    botSeat,
-                    botAction,
-                    events.Count,
-                    actorIsAutomatic: true));
+                game.MarkCompleted();
             }
 
-            game.Revision++;
-            var response = new MultiplayerGameActionResponse(
-                game.Revision,
-                membership.Seat,
-                ApiMapper.ToState(game.GameId, game.Bots, match.GetView(membership.Seat)),
-                events);
-            game.IdempotencyRecords.Add(
-                request.IdempotencyKey,
-                new IdempotencyRecord(userId, fingerprint, response));
-            return new MultiplayerGameServiceResult(
-                MultiplayerGameServiceStatus.Success,
-                ActionResponse: response);
+            if (!accepted.AutomationPending)
+            {
+                return new MultiplayerGameServiceResult(
+                    MultiplayerGameServiceStatus.Success,
+                    ActionResponse: accepted.Response);
+            }
+
+            return this.ContinueAutomaticMoves(game, membership.Seat, accepted, events);
         }
         finally
         {
             game.Gate.Release();
         }
     }
+
+    private MultiplayerGameServiceResult ContinueAutomaticMoves(
+        ActiveMultiplayerGame game,
+        PlayerPosition submittingSeat,
+        IdempotencyRecord record,
+        List<PublicGameEventDto>? existingEvents = null)
+    {
+        var events = existingEvents ?? record.Response.Events.ToList();
+        var match = game.Match;
+        while (!match.IsFinished && game.Players[match.ToMove.Index()] is { } bot)
+        {
+            var botSeat = match.ToMove;
+            var botBefore = match.GetView(botSeat);
+            BelotAction botAction;
+            try
+            {
+                botAction = bot.Decide(botBefore);
+            }
+            catch (Exception exception)
+            {
+                this.logger.LogError(
+                    exception,
+                    "Automatic multiplayer player {Seat} failed for game {GameId}; the accepted human action remains committed at revision {Revision}.",
+                    botSeat,
+                    game.GameId,
+                    game.Revision);
+                record.AutomationPending = true;
+                return new MultiplayerGameServiceResult(
+                    MultiplayerGameServiceStatus.Unavailable,
+                    CurrentRevision: game.Revision,
+                    Error: "The human action was accepted, but an automatic player could not decide. Retry the same idempotency key to continue.");
+            }
+
+            var botResult = match.Act(botSeat, botAction);
+            if (botResult != BelotActResult.Ok)
+            {
+                this.logger.LogError(
+                    "Automatic multiplayer player {Seat} returned an action rejected as {Result} for game {GameId} at revision {Revision}.",
+                    botSeat,
+                    botResult,
+                    game.GameId,
+                    game.Revision);
+                record.AutomationPending = true;
+                return new MultiplayerGameServiceResult(
+                    MultiplayerGameServiceStatus.Unavailable,
+                    CurrentRevision: game.Revision,
+                    Error: "The human action was accepted, but an automatic player's action was rejected. Retry the same idempotency key to continue.");
+            }
+
+            var botAfter = match.GetView(botSeat);
+            events.AddRange(GameEventProjector.Project(
+                botBefore,
+                botAfter,
+                botSeat,
+                botAction,
+                events.Count,
+                actorIsAutomatic: true));
+            record.Response = CreateActionResponse(game, submittingSeat, events);
+            record.AutomationPending = !match.IsFinished
+                && game.Players[match.ToMove.Index()] is not null;
+        }
+
+        record.AutomationPending = false;
+        if (match.IsFinished)
+        {
+            game.MarkCompleted();
+        }
+
+        return new MultiplayerGameServiceResult(
+            MultiplayerGameServiceStatus.Success,
+            ActionResponse: record.Response);
+    }
+
+    private static MultiplayerGameActionResponse CreateActionResponse(
+        ActiveMultiplayerGame game,
+        PlayerPosition submittingSeat,
+        IReadOnlyList<PublicGameEventDto> events) =>
+        new(
+            game.Revision,
+            submittingSeat,
+            ApiMapper.ToState(game.GameId, game.Bots, game.Match.GetView(submittingSeat)),
+            events.ToArray());
 
     private async Task<MemberRoomAccess> GetMemberRoomAsync(
         ClaimsPrincipal caller,

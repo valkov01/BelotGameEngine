@@ -221,6 +221,93 @@
         }
       }
     },
+    "/api/multiplayer/games/{gameId}": {
+      "parameters": [
+        {
+          "name": "gameId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" },
+          "description": "Opaque lobby/game ID returned when the host starts the lobby."
+        }
+      ],
+      "get": {
+        "operationId": "getMultiplayerGame",
+        "summary": "Get a private multiplayer game snapshot",
+        "description": "Returns the current revision, public match state and only the authenticated member's seat view. Game state is process-local and unavailable after an API restart.",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "The caller's current seat-scoped snapshot.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MultiplayerGameSnapshot" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/MultiplayerGameConflict" },
+          "410": { "$ref": "#/components/responses/MultiplayerGameUnavailable" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/multiplayer/games/{gameId}/actions": {
+      "parameters": [
+        {
+          "name": "gameId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" },
+          "description": "Opaque lobby/game ID returned when the host starts the lobby."
+        }
+      ],
+      "post": {
+        "operationId": "submitMultiplayerGameAction",
+        "summary": "Submit a revision-checked multiplayer action",
+        "description": "The authenticated member's seat is derived from membership, never from the request. Reuse the same idempotencyKey and request body for retries. Each accepted human action advances revision once; automatic bot actions are included in its response.",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/MultiplayerGameActionRequest" },
+              "examples": {
+                "bid": { "value": { "expectedRevision": 0, "idempotencyKey": "turn-1", "bid": "Clubs" } },
+                "playCard": {
+                  "value": {
+                    "expectedRevision": 12,
+                    "idempotencyKey": "turn-13",
+                    "card": { "suit": "Heart", "type": "Ace" },
+                    "belote": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The accepted action, updated caller-visible state and ordered public events.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MultiplayerGameActionResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/InvalidMultiplayerGameAction" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/MultiplayerGameConflict" },
+          "410": { "$ref": "#/components/responses/MultiplayerGameUnavailable" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/MultiplayerGameServiceUnavailable" }
+        }
+      }
+    },
     "/api/multiplayer/lobbies": {
       "post": {
         "operationId": "createMultiplayerLobby",
@@ -470,7 +557,7 @@
       "post": {
         "operationId": "startMultiplayerLobby",
         "summary": "Start the lobby as its host",
-        "description": "Requires at least two human members and readiness from every joined member. All remaining seats are assigned the host-selected bot profiles. This starts the lobby lifecycle only; it does not create or persist game state.",
+        "description": "Requires at least two human members and readiness from every joined member. All remaining seats are assigned the host-selected bot profiles. The match is held in process memory and cannot be restored after an API restart.",
         "security": [
           {
             "BearerAuth": []
@@ -498,6 +585,9 @@
           },
           "409": {
             "$ref": "#/components/responses/LobbyConflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/MultiplayerGameCapacity"
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
@@ -557,6 +647,50 @@
             }
           }
         }
+      },
+      "MultiplayerGameConflict": {
+        "description": "The lobby is not initialized, the match is finished, it is not the caller's turn, or expectedRevision is stale. currentRevision is returned when known.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/MultiplayerGameError" },
+            "example": { "error": "The game revision is stale; read the current seat snapshot before acting.", "currentRevision": 13 }
+          }
+        }
+      },
+      "MultiplayerGameUnavailable": {
+        "description": "The process-local match is unavailable after a restart or its completed-game retention period.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/MultiplayerGameError" },
+            "example": { "error": "The in-memory match is unavailable after a process restart.", "currentRevision": null }
+          }
+        }
+      },
+      "InvalidMultiplayerGameAction": {
+        "description": "The action body is malformed, the idempotency key is invalid, or the action is illegal for the current decision. currentRevision is returned when known.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/MultiplayerGameError" },
+            "example": { "error": "Provide a non-negative expectedRevision and an idempotencyKey of 1 to 128 characters.", "currentRevision": 13 }
+          }
+        }
+      },
+      "MultiplayerGameServiceUnavailable": {
+        "description": "A bot failed to decide after the human action was accepted. The response includes the advanced currentRevision; retry the identical request with the same idempotencyKey to resume bot actions.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/MultiplayerGameError" },
+            "example": { "error": "The human action was accepted, but an automatic player could not decide. Retry the same idempotency key to continue.", "currentRevision": 14 }
+          }
+        }
+      },
+      "MultiplayerGameCapacity": {
+        "description": "The process-local active-game capacity is full. Active matches are not evicted; retry after a completed game expires.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/MultiplayerGameError" }
+          }
+        }
       }
     },
     "schemas": {
@@ -580,6 +714,63 @@
         "required": ["error"],
         "properties": {
           "error": { "type": "string" }
+        }
+      },
+      "MultiplayerGameError": {
+        "type": "object",
+        "required": ["error", "currentRevision"],
+        "properties": {
+          "error": { "type": "string" },
+          "currentRevision": { "type": "integer", "format": "int64", "minimum": 0, "nullable": true }
+        }
+      },
+      "MultiplayerGameSnapshot": {
+        "type": "object",
+        "required": ["gameId", "revision", "yourSeat", "state"],
+        "properties": {
+          "gameId": { "type": "string" },
+          "revision": { "type": "integer", "format": "int64", "minimum": 0 },
+          "yourSeat": { "type": "string", "enum": ["South", "East", "North", "West"] },
+          "state": { "$ref": "#/components/schemas/GameState" }
+        }
+      },
+      "MultiplayerGameActionRequest": {
+        "type": "object",
+        "required": ["expectedRevision", "idempotencyKey"],
+        "description": "Provide only the action field appropriate to the current decision. Reuse the complete request unchanged when retrying.",
+        "properties": {
+          "expectedRevision": { "type": "integer", "format": "int64", "minimum": 0 },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Client-generated key bound to this authenticated user and exact request."
+          },
+          "bid": {
+            "type": "string",
+            "enum": ["Pass", "Clubs", "Diamonds", "Hearts", "Spades", "NoTrumps", "AllTrumps", "Double", "ReDouble"]
+          },
+          "announces": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/AnnounceRequest" },
+            "description": "Selected offered declarations, or an empty array."
+          },
+          "card": { "$ref": "#/components/schemas/Card" },
+          "belote": { "type": "boolean", "default": false }
+        }
+      },
+      "MultiplayerGameActionResponse": {
+        "type": "object",
+        "required": ["revision", "yourSeat", "state", "events"],
+        "properties": {
+          "revision": { "type": "integer", "format": "int64", "minimum": 1 },
+          "yourSeat": { "type": "string", "enum": ["South", "East", "North", "West"] },
+          "state": { "$ref": "#/components/schemas/GameState" },
+          "events": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicGameEvent" },
+            "description": "Ordered public events produced by the accepted human action and any automatic bot actions."
+          }
         }
       },
       "CreateMultiplayerRoomRequest": {
@@ -697,6 +888,7 @@
             "type": "string",
             "enum": [
               "WaitingForPlayers",
+              "Starting",
               "Started"
             ]
           },
@@ -896,7 +1088,7 @@
         "type": "object",
         "required": ["gameId", "bots", "isFinished", "winner", "toMove", "decision", "roundNumber", "firstToPlay", "southNorthPoints", "eastWestPoints", "hangingPoints", "contract", "bids", "announces", "tricks", "currentTrick", "cardCounts", "hand", "availableBids", "availableAnnounces", "playableCards", "beloteCards", "previousRounds"],
         "properties": {
-          "gameId": { "type": "string", "description": "Opaque bearer token for this in-memory game." },
+          "gameId": { "type": "string", "description": "Opaque ID for the in-memory game; solo routes also use it as a bearer token." },
           "bots": { "type": "object", "additionalProperties": { "type": "string", "enum": ["random", "beginner", "skilled", "expert", "master"] }, "example": { "North": "skilled", "East": "skilled", "West": "skilled" } },
           "isFinished": { "type": "boolean" },
           "winner": { "type": "string", "enum": ["SouthNorthTeam", "EastWestTeam"], "nullable": true },
@@ -913,7 +1105,7 @@
           "tricks": { "type": "array", "items": { "$ref": "#/components/schemas/Trick" } },
           "currentTrick": { "type": "array", "items": { "$ref": "#/components/schemas/PlayedCard" } },
           "cardCounts": { "type": "array", "items": { "type": "integer" }, "description": "Card counts in engine seat order: South, East, North, West." },
-          "hand": { "type": "array", "items": { "$ref": "#/components/schemas/Card" }, "description": "Only South's hand." },
+          "hand": { "type": "array", "items": { "$ref": "#/components/schemas/Card" }, "description": "Only the requesting seat's hand (South for solo routes)." },
           "availableBids": { "type": "array", "items": { "type": "string", "enum": ["Pass", "Clubs", "Diamonds", "Hearts", "Spades", "NoTrumps", "AllTrumps", "Double", "ReDouble"] } },
           "availableAnnounces": { "type": "array", "items": { "$ref": "#/components/schemas/Announce" } },
           "playableCards": { "type": "array", "items": { "$ref": "#/components/schemas/Card" } },

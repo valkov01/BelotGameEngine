@@ -43,16 +43,20 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     private readonly string? jwtSecret;
 
+    private readonly string? multiplayerConnectionString;
+
     public ApiFactory(
         bool revealHandsEnabled = false,
         string? debugAccessKey = null,
         bool useEcdsaSigningKey = false,
-        string? jwtSecret = null)
+        string? jwtSecret = null,
+        string? multiplayerConnectionString = null)
     {
         this.revealHandsEnabled = revealHandsEnabled;
         this.debugAccessKey = debugAccessKey;
         this.useEcdsaSigningKey = useEcdsaSigningKey;
         this.jwtSecret = jwtSecret;
+        this.multiplayerConnectionString = multiplayerConnectionString;
     }
 
     public static string CreateAccessToken(
@@ -101,6 +105,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 ["Authentication:Supabase:Issuer"] = TestIssuer,
                 ["Authentication:Supabase:Audience"] = TestAudience,
                 ["Authentication:Supabase:JwtSecret"] = this.jwtSecret,
+                ["Multiplayer:PostgresConnectionString"] = this.multiplayerConnectionString,
             }));
 
         builder.ConfigureTestServices(services =>

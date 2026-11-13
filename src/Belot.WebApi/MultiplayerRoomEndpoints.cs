@@ -162,6 +162,9 @@
             MultiplayerGameServiceStatus.Gone => Results.Json(
                 new MultiplayerGameErrorDto(result.Error ?? "The in-memory match is unavailable.", null),
                 statusCode: StatusCodes.Status410Gone),
+            MultiplayerGameServiceStatus.Unavailable => Results.Json(
+                new MultiplayerGameErrorDto(result.Error ?? "The multiplayer game service is temporarily unavailable.", result.CurrentRevision),
+                statusCode: StatusCodes.Status503ServiceUnavailable),
             _ => throw new InvalidOperationException($"Unexpected game service result: {result.Status}."),
         };
     }

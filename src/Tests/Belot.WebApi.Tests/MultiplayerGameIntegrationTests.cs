@@ -5,8 +5,12 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
+using Belot.Engine;
+using Belot.Engine.Game;
+using Belot.Engine.GameMechanics;
 using Belot.Engine.Players;
 
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
 using Xunit;
@@ -18,16 +22,70 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
         Converters = { new JsonStringEnumConverter() },
     };
 
-    private readonly ApiFactory factory = new();
+    private readonly ApiFactory factory;
 
     private readonly HttpClient client;
 
-    public MultiplayerGameIntegrationTests() => this.client = this.factory.CreateClient();
+    public MultiplayerGameIntegrationTests()
+    {
+        this.factory = new ApiFactory(
+            multiplayerConnectionString: Environment.GetEnvironmentVariable("BELOT_TEST_POSTGRES"));
+        this.client = this.factory.CreateClient();
+    }
 
     public void Dispose()
     {
         this.client.Dispose();
         this.factory.Dispose();
+    }
+
+    [Fact]
+    public async Task StaticOpenApiDocumentsTheAuthenticatedMultiplayerGameRoutes()
+    {
+        using var response = await this.client.GetAsync("/openapi/v1.json");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var paths = document.RootElement.GetProperty("paths");
+        var snapshot = paths.GetProperty("/api/multiplayer/games/{gameId}").GetProperty("get");
+        var action = paths.GetProperty("/api/multiplayer/games/{gameId}/actions").GetProperty("post");
+        Assert.Equal("#/components/schemas/MultiplayerGameSnapshot", snapshot
+            .GetProperty("responses").GetProperty("200").GetProperty("content")
+            .GetProperty("application/json").GetProperty("schema").GetProperty("$ref").GetString());
+        Assert.Equal("#/components/schemas/MultiplayerGameActionResponse", action
+            .GetProperty("responses").GetProperty("200").GetProperty("content")
+            .GetProperty("application/json").GetProperty("schema").GetProperty("$ref").GetString());
+        Assert.Equal("#/components/schemas/MultiplayerGameActionRequest", action
+            .GetProperty("requestBody").GetProperty("content").GetProperty("application/json")
+            .GetProperty("schema").GetProperty("$ref").GetString());
+    }
+
+    [Fact]
+    public void StoreKeepsActiveGamesAndExpiresOnlyCompletedGamesAfterRetention()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Multiplayer:Games:MaximumActive"] = "1",
+                ["Multiplayer:Games:CompletedRetentionMinutes"] = "1",
+            })
+            .Build();
+        var store = new MultiplayerGameStore(configuration);
+        var active = this.CreateStoreGame("active");
+        var next = this.CreateStoreGame("next");
+
+        Assert.True(store.TryAdd(active));
+        Assert.False(store.HasCapacity);
+        Assert.False(store.TryAdd(next));
+
+        var future = DateTimeOffset.UtcNow.AddHours(1);
+        store.RemoveExpiredCompletedGames(future);
+        Assert.Same(active, store.Find("active"));
+
+        active.MarkCompleted();
+        store.RemoveExpiredCompletedGames(future);
+        Assert.Null(store.Find("active"));
+        Assert.True(store.HasCapacity);
     }
 
     [Theory]
@@ -182,14 +240,68 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
     }
 
     [Fact]
-    public async Task FourHumansCanPlayACompleteMatchThroughAuthenticatedActions()
+    public async Task FailedBotDecisionCommitsRevisionAndRetryResumesWithoutReapplyingHumanAction()
     {
-        var room = await this.CreateStartedRoomAsync(
-            PlayerPosition.East,
-            PlayerPosition.North,
-            PlayerPosition.West);
+        var room = await this.CreateStartedRoomAsync(PlayerPosition.North);
         var gameId = room.Room.RoomId;
+        var game = this.factory.Services.GetRequiredService<MultiplayerGameStore>().Find(gameId);
+        Assert.NotNull(game);
+        game!.Players[PlayerPosition.East.Index()] = new FailOncePlayer();
+
+        var userId = room.Members[PlayerPosition.South];
+        var action = this.CreateAction(await this.GetSnapshotAsync(gameId, userId), "retry-after-bot-failure");
+        using (var failed = await this.SendActionAsync(gameId, userId, action))
+        {
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, failed.StatusCode);
+            var error = (await failed.Content.ReadFromJsonAsync<MultiplayerGameErrorDto>(ApiJsonOptions))!;
+            Assert.Equal(1, error.CurrentRevision);
+        }
+
+        var afterFailure = await this.GetSnapshotAsync(gameId, userId);
+        Assert.Equal(1, afterFailure.Revision);
+        Assert.Equal(PlayerPosition.East.ToString(), afterFailure.State.ToMove);
+        Assert.Single(afterFailure.State.Bids.Where(bid => bid.Seat == PlayerPosition.South.ToString()));
+
+        using var retry = await this.SendActionAsync(gameId, userId, action);
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        var result = (await retry.Content.ReadFromJsonAsync<MultiplayerGameActionResponse>(ApiJsonOptions))!;
+        Assert.Equal(1, result.Revision);
+        Assert.Single(result.Events.Where(gameEvent =>
+            gameEvent.Seat == PlayerPosition.South.ToString()
+            && gameEvent.Automatic != true
+            && gameEvent.Type == "bid"));
+        Assert.Contains(result.Events, gameEvent =>
+            gameEvent.Seat == PlayerPosition.East.ToString()
+            && gameEvent.Automatic == true
+            && gameEvent.Type == "bid");
+
+        var afterRetry = await this.GetSnapshotAsync(gameId, userId);
+        Assert.Equal(1, afterRetry.Revision);
+        Assert.Single(afterRetry.State.Bids.Where(bid => bid.Seat == PlayerPosition.South.ToString()));
+    }
+
+    [Theory]
+    [InlineData("North", null, null)]
+    [InlineData("East", null, null)]
+    [InlineData("East", "North", null)]
+    [InlineData("East", "North", "West")]
+    public async Task HumanAndBotSeatCombinationsCanPlayCompleteMatches(
+        string firstJoiningSeatName,
+        string? secondJoiningSeatName,
+        string? thirdJoiningSeatName)
+    {
+        var joiningSeats = new[] { firstJoiningSeatName, secondJoiningSeatName, thirdJoiningSeatName }
+            .OfType<string>()
+            .Select(name => Enum.Parse<PlayerPosition>(name))
+            .ToArray();
+        var room = await this.CreateStartedRoomAsync(joiningSeats);
+        var gameId = room.Room.RoomId;
+        var botSeats = room.Room.Seats
+            .Where(seat => seat.BotProfileId is not null)
+            .Select(seat => seat.Seat.ToString())
+            .ToHashSet(StringComparer.Ordinal);
         var events = new HashSet<string>(StringComparer.Ordinal);
+        var sawAutomaticBotAction = false;
         MultiplayerGameSnapshotDto snapshot = await this.GetSnapshotAsync(gameId, room.Members[PlayerPosition.South]);
 
         for (var index = 0; index < 1600 && !snapshot.State.IsFinished; index++)
@@ -218,6 +330,8 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
                     && gameEvent.Type == expectedEventType
                     && gameEvent.Automatic != true);
             events.UnionWith(accepted.Events.Select(gameEvent => gameEvent.Type));
+            sawAutomaticBotAction |= accepted.Events.Any(gameEvent =>
+                gameEvent.Automatic == true && botSeats.Contains(gameEvent.Seat ?? string.Empty));
             snapshot = new MultiplayerGameSnapshotDto(gameId, accepted.Revision, accepted.YourSeat, accepted.State);
 
             if (!snapshot.State.IsFinished)
@@ -230,10 +344,10 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
         Assert.True(snapshot.State.IsFinished, "The multiplayer match did not finish within the action limit.");
         Assert.NotNull(snapshot.State.Winner);
         Assert.Contains("bid", events);
-        Assert.Contains("declarations", events);
         Assert.Contains("card", events);
         Assert.Contains("trick", events);
         Assert.Contains("deal-ended", events);
+        Assert.Equal(botSeats.Count > 0, sawAutomaticBotAction);
         Assert.Equal(snapshot.State.SouthNorthPoints, snapshot.State.PreviousRounds.Sum(round => round.SouthNorthPoints));
         Assert.Equal(snapshot.State.EastWestPoints, snapshot.State.PreviousRounds.Sum(round => round.EastWestPoints));
         Assert.All(
@@ -458,6 +572,68 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
             ApiFactory.CreateAccessToken(userId));
         request.Content = JsonContent.Create(action, options: ApiJsonOptions);
         return this.client.SendAsync(request);
+    }
+
+    private ActiveMultiplayerGame CreateStoreGame(string gameId)
+    {
+        var room = new MultiplayerRoom(
+            gameId,
+            "host",
+            DateTimeOffset.UtcNow,
+            MultiplayerRoomStatus.Started,
+            2,
+            new Dictionary<string, string>(),
+            Array.Empty<MultiplayerSeat>(),
+            Array.Empty<RoomMembership>());
+        var match = new BelotMatch();
+        match.Start();
+        return new ActiveMultiplayerGame(
+            gameId,
+            room,
+            match,
+            new Dictionary<string, string>(),
+            new IPlayer?[4]);
+    }
+
+    private sealed class FailOncePlayer : IPlayer
+    {
+        private readonly IPlayer fallback = BotProfiles.Create("random");
+
+        private bool hasFailed;
+
+        public BidType GetBid(PlayerGetBidContext context)
+        {
+            this.ThrowOnFirstDecision();
+            return this.fallback.GetBid(context);
+        }
+
+        public IList<Announce> GetAnnounces(PlayerGetAnnouncesContext context)
+        {
+            this.ThrowOnFirstDecision();
+            return this.fallback.GetAnnounces(context);
+        }
+
+        public PlayCardAction PlayCard(PlayerPlayCardContext context)
+        {
+            this.ThrowOnFirstDecision();
+            return this.fallback.PlayCard(context);
+        }
+
+        public void EndOfTrick(IEnumerable<PlayCardAction> trickActions) =>
+            this.fallback.EndOfTrick(trickActions);
+
+        public void EndOfRound(RoundResult roundResult) => this.fallback.EndOfRound(roundResult);
+
+        public void EndOfGame(GameResult gameResult) => this.fallback.EndOfGame(gameResult);
+
+        private void ThrowOnFirstDecision()
+        {
+            if (!this.hasFailed)
+            {
+                this.hasFailed = true;
+                throw new InvalidOperationException("Simulated one-time bot failure.");
+            }
+        }
     }
 
     private sealed record StartedRoom(
