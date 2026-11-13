@@ -56,3 +56,7 @@ Content-Type: application/json
   "idempotencyKey": "replace-with-a-unique-client-generated-key",
   "bid": "Pass"
 }
+
+### Recover pending bot actions after a bot failure (any authenticated room member)
+POST {{baseUrl}}/api/multiplayer/games/{{lobbyId}}/automation/resume
+Authorization: Bearer {{accessToken}}

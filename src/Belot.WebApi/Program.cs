@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using System.Threading.RateLimiting;
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.IdentityModel.Tokens;
 
 using Belot.WebApi;
@@ -55,6 +56,17 @@ builder.Services
             options.TokenValidationParameters.IssuerSigningKey =
                 new SymmetricSecurityKey(Encoding.UTF8.GetBytes(supabaseJwtSecret));
         }
+
+        options.Events.OnMessageReceived = context =>
+        {
+            if (context.Request.Path.StartsWithSegments("/hubs/multiplayer")
+                && context.Request.Query.TryGetValue("access_token", out var accessToken))
+            {
+                context.Token = accessToken;
+            }
+
+            return Task.CompletedTask;
+        };
     });
 
 builder.Services.AddAuthorization(options =>
@@ -98,6 +110,15 @@ builder.Services.AddSingleton<GameStore>();
 builder.Services.AddSingleton<GameService>();
 builder.Services.AddSingleton<DebugHandsAccess>();
 builder.Services.AddSingleton<MultiplayerGameStore>();
+builder.Services.AddSingleton<IMultiplayerGameRevisionProvider>(
+    services => services.GetRequiredService<MultiplayerGameStore>());
+builder.Services.AddSignalR().AddJsonProtocol(options =>
+{
+    options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
+builder.Services.AddSingleton<MultiplayerRealtimePublisher>();
+builder.Services.AddSingleton<IMultiplayerRealtimePublisher>(
+    services => services.GetRequiredService<MultiplayerRealtimePublisher>());
 if (string.IsNullOrWhiteSpace(postgresConnectionString))
 {
     builder.Services.AddSingleton<IMultiplayerRoomRepository, InMemoryMultiplayerRoomRepository>();
@@ -130,6 +151,10 @@ app.UseStaticFiles();
 app.MapGet("/api/health", () => Results.Ok(new HealthResponse("ok")));
 app.MapGet("/api/bots", () => Results.Ok(BotProfiles.All));
 app.MapMultiplayerRoomEndpoints();
+app.MapHub<MultiplayerRealtimeHub>("/hubs/multiplayer", options =>
+{
+    options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
+});
 
 app.MapPost("/api/games", (CreateGameRequest request, GameService games) =>
 {

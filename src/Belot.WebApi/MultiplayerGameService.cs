@@ -15,7 +15,8 @@ public sealed record MultiplayerGameSnapshotDto(
     string GameId,
     long Revision,
     PlayerPosition YourSeat,
-    GameStateDto State);
+    GameStateDto State,
+    int LastEventSequence = -1);
 
 /// <summary>A successful multiplayer action and the public events it produced.</summary>
 public sealed record MultiplayerGameActionResponse(
@@ -23,6 +24,9 @@ public sealed record MultiplayerGameActionResponse(
     PlayerPosition YourSeat,
     GameStateDto State,
     IReadOnlyList<PublicGameEventDto> Events);
+
+/// <summary>Public status of a request to resume pending automatic actions.</summary>
+public sealed record MultiplayerAutomationResponse(long Revision, bool AutomationPending);
 
 /// <summary>Explains a multiplayer action failure and the current revision when one is known.</summary>
 public sealed record MultiplayerGameErrorDto(string Error, long? CurrentRevision);
@@ -96,9 +100,25 @@ internal interface IMultiplayerGameService
         string gameId,
         MultiplayerGameActionRequest? request,
         CancellationToken cancellationToken);
+
+    Task<MultiplayerAutomationServiceResult> ResumeAutomaticMovesAsync(
+        ClaimsPrincipal caller,
+        string gameId,
+        CancellationToken cancellationToken);
 }
 
-internal sealed class MultiplayerGameStore
+internal sealed record MultiplayerAutomationServiceResult(
+    MultiplayerGameServiceStatus Status,
+    long? CurrentRevision = null,
+    bool AutomationPending = false,
+    string? Error = null);
+
+public interface IMultiplayerGameRevisionProvider
+{
+    bool TryGetRevision(string gameId, out long revision);
+}
+
+internal sealed class MultiplayerGameStore : IMultiplayerGameRevisionProvider
 {
     private readonly ConcurrentDictionary<string, ActiveMultiplayerGame> games = new(StringComparer.Ordinal);
 
@@ -137,6 +157,13 @@ internal sealed class MultiplayerGameStore
             this.RemoveExpiredCompletedGames();
             return this.games.TryGetValue(gameId, out var game) ? game : null;
         }
+    }
+
+    public bool TryGetRevision(string gameId, out long revision)
+    {
+        var game = this.Find(gameId);
+        revision = game?.Revision ?? 0;
+        return game is not null;
     }
 
     public bool TryAdd(ActiveMultiplayerGame game)
@@ -226,11 +253,14 @@ internal sealed class ActiveMultiplayerGame
 
 internal sealed class IdempotencyRecord(
     string userId,
+    PlayerPosition submittingSeat,
     string fingerprint,
     MultiplayerGameActionResponse response,
     bool automationPending)
 {
     public string UserId { get; } = userId;
+
+    public PlayerPosition SubmittingSeat { get; } = submittingSeat;
 
     public string Fingerprint { get; } = fingerprint;
 
@@ -241,22 +271,28 @@ internal sealed class IdempotencyRecord(
 
 internal sealed class MultiplayerGameService : IMultiplayerGameService
 {
+    private const int MaximumAutomaticActionsPerRequest = 32;
+
     private readonly IMultiplayerRoomRepository rooms;
 
     private readonly MultiplayerGameStore games;
 
     private readonly ILogger<MultiplayerGameService> logger;
 
+    private readonly IMultiplayerRealtimePublisher realtime;
+
     private readonly SemaphoreSlim startGate = new(1, 1);
 
     public MultiplayerGameService(
         IMultiplayerRoomRepository rooms,
         MultiplayerGameStore games,
-        ILogger<MultiplayerGameService> logger)
+        ILogger<MultiplayerGameService> logger,
+        IMultiplayerRealtimePublisher realtime)
     {
         this.rooms = rooms;
         this.games = games;
         this.logger = logger;
+        this.realtime = realtime;
     }
 
     public bool IsGameAvailable(string roomId) => this.games.Find(roomId) is not null;
@@ -377,9 +413,15 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
         {
             var membership = access.Membership!;
             var state = ApiMapper.ToState(game.GameId, game.Bots, game.Match.GetView(membership.Seat));
+            var cursor = this.realtime.GetGameCursor(game.GameId, game.Revision);
             return new MultiplayerGameServiceResult(
                 MultiplayerGameServiceStatus.Success,
-                Snapshot: new MultiplayerGameSnapshotDto(game.GameId, game.Revision, membership.Seat, state));
+                Snapshot: new MultiplayerGameSnapshotDto(
+                    game.GameId,
+                    game.Revision,
+                    membership.Seat,
+                    state,
+                    cursor.Sequence));
         }
         finally
         {
@@ -442,7 +484,12 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
                 }
 
                 return previous.AutomationPending
-                    ? this.ContinueAutomaticMoves(game, membership.Seat, previous)
+                    ? await this.ContinueAutomaticMovesAsync(
+                        game,
+                        membership.Seat,
+                        previous,
+                        existingEvents: null,
+                        previous.Response.Events.Count)
                     : new MultiplayerGameServiceResult(
                         MultiplayerGameServiceStatus.Success,
                         ActionResponse: previous.Response);
@@ -503,6 +550,7 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
             game.Revision++;
             var accepted = new IdempotencyRecord(
                 userId,
+                membership.Seat,
                 fingerprint,
                 new MultiplayerGameActionResponse(
                     game.Revision,
@@ -520,14 +568,12 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
                 game.MarkCompleted();
             }
 
-            if (!accepted.AutomationPending)
-            {
-                return new MultiplayerGameServiceResult(
-                    MultiplayerGameServiceStatus.Success,
-                    ActionResponse: accepted.Response);
-            }
-
-            return this.ContinueAutomaticMoves(game, membership.Seat, accepted, events);
+            return await this.ContinueAutomaticMovesAsync(
+                game,
+                membership.Seat,
+                accepted,
+                events,
+                0);
         }
         finally
         {
@@ -535,16 +581,78 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
         }
     }
 
-    private MultiplayerGameServiceResult ContinueAutomaticMoves(
+    public async Task<MultiplayerAutomationServiceResult> ResumeAutomaticMovesAsync(
+        ClaimsPrincipal caller,
+        string gameId,
+        CancellationToken cancellationToken)
+    {
+        var access = await this.GetMemberRoomAsync(caller, gameId, cancellationToken);
+        if (access.Result is not null)
+        {
+            return new MultiplayerAutomationServiceResult(
+                (MultiplayerGameServiceStatus)access.Result.Status,
+                Error: access.Result.Error);
+        }
+
+        if (access.Room!.Status != MultiplayerRoomStatus.Started)
+        {
+            return new MultiplayerAutomationServiceResult(
+                MultiplayerGameServiceStatus.Conflict,
+                Error: "The lobby has not completed match initialization.");
+        }
+
+        var game = this.games.Find(gameId);
+        if (game is null)
+        {
+            return new MultiplayerAutomationServiceResult(
+                MultiplayerGameServiceStatus.Gone,
+                Error: "The in-memory match is unavailable after a process restart.");
+        }
+
+        await game.Gate.WaitAsync(cancellationToken);
+        try
+        {
+            var pending = game.IdempotencyRecords.Values.FirstOrDefault(record => record.AutomationPending);
+            if (pending is null)
+            {
+                return new MultiplayerAutomationServiceResult(
+                    MultiplayerGameServiceStatus.Success,
+                    CurrentRevision: game.Revision);
+            }
+
+            var result = await this.ContinueAutomaticMovesAsync(
+                game,
+                pending.SubmittingSeat,
+                pending,
+                existingEvents: null,
+                pending.Response.Events.Count);
+            return new MultiplayerAutomationServiceResult(
+                result.Status,
+                game.Revision,
+                pending.AutomationPending,
+                result.Error);
+        }
+        finally
+        {
+            game.Gate.Release();
+        }
+    }
+
+    private async Task<MultiplayerGameServiceResult> ContinueAutomaticMovesAsync(
         ActiveMultiplayerGame game,
         PlayerPosition submittingSeat,
         IdempotencyRecord record,
-        List<PublicGameEventDto>? existingEvents = null)
+        List<PublicGameEventDto>? existingEvents,
+        int firstEventToPublish)
     {
         var events = existingEvents ?? record.Response.Events.ToList();
         var match = game.Match;
-        while (!match.IsFinished && game.Players[match.ToMove.Index()] is { } bot)
+        var botActions = 0;
+        while (!match.IsFinished
+            && game.Players[match.ToMove.Index()] is { } bot
+            && botActions < MaximumAutomaticActionsPerRequest)
         {
+            botActions++;
             var botSeat = match.ToMove;
             var botBefore = match.GetView(botSeat);
             BelotAction botAction;
@@ -561,6 +669,7 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
                     game.GameId,
                     game.Revision);
                 record.AutomationPending = true;
+                await this.PublishEventsSafelyAsync(game.GameId, game.Revision, events, firstEventToPublish);
                 return new MultiplayerGameServiceResult(
                     MultiplayerGameServiceStatus.Unavailable,
                     CurrentRevision: game.Revision,
@@ -577,6 +686,7 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
                     game.GameId,
                     game.Revision);
                 record.AutomationPending = true;
+                await this.PublishEventsSafelyAsync(game.GameId, game.Revision, events, firstEventToPublish);
                 return new MultiplayerGameServiceResult(
                     MultiplayerGameServiceStatus.Unavailable,
                     CurrentRevision: game.Revision,
@@ -602,9 +712,50 @@ internal sealed class MultiplayerGameService : IMultiplayerGameService
             game.MarkCompleted();
         }
 
+        record.Response = CreateActionResponse(game, submittingSeat, events);
+        record.AutomationPending = !match.IsFinished
+            && game.Players[match.ToMove.Index()] is not null;
+        await this.PublishEventsSafelyAsync(game.GameId, game.Revision, events, firstEventToPublish);
+        if (record.AutomationPending)
+        {
+            return new MultiplayerGameServiceResult(
+                MultiplayerGameServiceStatus.Unavailable,
+                CurrentRevision: game.Revision,
+                Error: "Automatic moves exceeded the per-request limit. Retry the same idempotency key or ask another room member to resume.");
+        }
+
         return new MultiplayerGameServiceResult(
             MultiplayerGameServiceStatus.Success,
             ActionResponse: record.Response);
+    }
+
+    private async Task PublishEventsSafelyAsync(
+        string gameId,
+        long revision,
+        IReadOnlyList<PublicGameEventDto> events,
+        int firstEventIndex)
+    {
+        if (firstEventIndex >= events.Count)
+        {
+            return;
+        }
+
+        try
+        {
+            await this.realtime.PublishGameEventsAsync(
+                gameId,
+                revision,
+                events.Skip(firstEventIndex).ToArray(),
+                CancellationToken.None);
+        }
+        catch (Exception exception)
+        {
+            this.logger.LogWarning(
+                exception,
+                "Could not publish public multiplayer events for game {GameId} revision {Revision}.",
+                gameId,
+                revision);
+        }
     }
 
     private static MultiplayerGameActionResponse CreateActionResponse(

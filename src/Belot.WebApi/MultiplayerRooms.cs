@@ -69,7 +69,9 @@ public sealed record MultiplayerRoomDto(
     int HumanPlayerCount,
     int MaximumHumanPlayers,
     bool IsGameAvailable,
-    IReadOnlyList<MultiplayerSeatDto> Seats);
+    IReadOnlyList<MultiplayerSeatDto> Seats,
+    long EventRevision = 0,
+    int EventSequence = -1);
 
 /// <summary>Configuration for a private multiplayer lobby.</summary>
 public sealed record CreateMultiplayerRoomRequest
@@ -620,7 +622,11 @@ internal sealed class MultiplayerRoomService : IRoomMembershipService, ISeatAssi
 
 internal static class MultiplayerRoomMapper
 {
-    public static MultiplayerRoomDto ToDto(MultiplayerRoom room, string userId, bool isGameAvailable = false)
+    public static MultiplayerRoomDto ToDto(
+        MultiplayerRoom room,
+        string userId,
+        bool isGameAvailable = false,
+        MultiplayerEventCursor? eventCursor = null)
     {
         var membership = room.Members.Single(member => string.Equals(member.UserId, userId, StringComparison.Ordinal));
         var seats = room.Seats
@@ -642,6 +648,8 @@ internal static class MultiplayerRoomMapper
             room.Members.Count,
             room.MaximumHumanPlayers,
             isGameAvailable,
-            seats);
+            seats,
+            eventCursor?.Revision ?? 0,
+            eventCursor?.Sequence ?? -1);
     }
 }

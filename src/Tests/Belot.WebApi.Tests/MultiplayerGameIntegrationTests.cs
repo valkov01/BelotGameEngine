@@ -4,12 +4,16 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Channels;
 
 using Belot.Engine;
 using Belot.Engine.Game;
 using Belot.Engine.GameMechanics;
 using Belot.Engine.Players;
 
+using Microsoft.AspNetCore.Http.Connections;
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -29,7 +33,8 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
     public MultiplayerGameIntegrationTests()
     {
         this.factory = new ApiFactory(
-            multiplayerConnectionString: Environment.GetEnvironmentVariable("BELOT_TEST_POSTGRES"));
+            multiplayerConnectionString: Environment.GetEnvironmentVariable("BELOT_TEST_POSTGRES"),
+            realtimeEventsPerGame: 32);
         this.client = this.factory.CreateClient();
     }
 
@@ -49,6 +54,7 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
         var paths = document.RootElement.GetProperty("paths");
         var snapshot = paths.GetProperty("/api/multiplayer/games/{gameId}").GetProperty("get");
         var action = paths.GetProperty("/api/multiplayer/games/{gameId}/actions").GetProperty("post");
+        var resume = paths.GetProperty("/api/multiplayer/games/{gameId}/automation/resume").GetProperty("post");
         Assert.Equal("#/components/schemas/MultiplayerGameSnapshot", snapshot
             .GetProperty("responses").GetProperty("200").GetProperty("content")
             .GetProperty("application/json").GetProperty("schema").GetProperty("$ref").GetString());
@@ -58,6 +64,9 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
         Assert.Equal("#/components/schemas/MultiplayerGameActionRequest", action
             .GetProperty("requestBody").GetProperty("content").GetProperty("application/json")
             .GetProperty("schema").GetProperty("$ref").GetString());
+        Assert.Equal("#/components/schemas/MultiplayerAutomationResponse", resume
+            .GetProperty("responses").GetProperty("200").GetProperty("content")
+            .GetProperty("application/json").GetProperty("schema").GetProperty("$ref").GetString());
     }
 
     [Fact]
@@ -377,6 +386,445 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task HubSubscriptionsRequireRoomMembershipAndValidatedIdentity()
+    {
+        var room = await this.CreateStartedRoomAsync(PlayerPosition.North);
+        await using var outsider = this.CreateHubConnection(Guid.NewGuid().ToString());
+        await outsider.StartAsync();
+
+        await Assert.ThrowsAsync<HubException>(() =>
+            outsider.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+                "JoinRoom",
+                room.Room.RoomId,
+                0L,
+                -1));
+        await Assert.ThrowsAsync<HubException>(() =>
+            outsider.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+                "JoinGame",
+                room.Room.RoomId,
+                0L,
+                -1));
+
+        await using var unauthenticated = this.CreateHubConnection(null);
+        await Assert.ThrowsAnyAsync<Exception>(() => unauthenticated.StartAsync());
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public async Task EveryHumanGameSubscriberReceivesOnlyOrderedPublicEvents(int humanCount)
+    {
+        var joiningSeats = new[] { PlayerPosition.North, PlayerPosition.East, PlayerPosition.West }
+            .Take(humanCount - 1)
+            .ToArray();
+        var room = await this.CreateStartedRoomAsync(joiningSeats);
+        var channels = new List<Channel<MultiplayerGameEventEnvelope>>();
+        var connections = new List<HubConnection>();
+        try
+        {
+            foreach (var userId in room.Members.Values)
+            {
+                var connection = this.CreateHubConnection(userId);
+                var channel = Channel.CreateUnbounded<MultiplayerGameEventEnvelope>();
+                connection.On<MultiplayerGameEventEnvelope>(
+                    "GameEvent",
+                    gameEvent => channel.Writer.TryWrite(gameEvent));
+                await connection.StartAsync();
+                var snapshot = await this.GetSnapshotAsync(room.Room.RoomId, userId);
+                var subscribed = await connection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+                    "JoinGame",
+                    room.Room.RoomId,
+                    snapshot.Revision,
+                    snapshot.LastEventSequence);
+                Assert.False(subscribed.SnapshotRequired);
+                connections.Add(connection);
+                channels.Add(channel);
+            }
+
+            var southId = room.Members[PlayerPosition.South];
+            var southSnapshot = await this.GetSnapshotAsync(room.Room.RoomId, southId);
+            var action = this.CreateAction(southSnapshot, "realtime-first-action");
+            using var acceptedResponse = await this.SendActionAsync(room.Room.RoomId, southId, action);
+            Assert.Equal(HttpStatusCode.OK, acceptedResponse.StatusCode);
+            var accepted = (await acceptedResponse.Content.ReadFromJsonAsync<MultiplayerGameActionResponse>(ApiJsonOptions))!;
+            Assert.NotEmpty(accepted.Events);
+
+            var deliveredByClient = new List<MultiplayerGameEventEnvelope[]>();
+            foreach (var channel in channels)
+            {
+                var delivered = new MultiplayerGameEventEnvelope[accepted.Events.Count];
+                for (var eventIndex = 0; eventIndex < delivered.Length; eventIndex++)
+                {
+                    delivered[eventIndex] = await channel.Reader.ReadAsync()
+                        .AsTask()
+                        .WaitAsync(TimeSpan.FromSeconds(10));
+                }
+
+                Assert.Equal(
+                    Enumerable.Range(0, accepted.Events.Count),
+                    delivered.Select(gameEvent => gameEvent.Sequence));
+                Assert.All(delivered, gameEvent => Assert.Equal(accepted.Revision, gameEvent.Revision));
+                Assert.Equal(accepted.Events.Select(gameEvent => gameEvent.Type), delivered.Select(gameEvent => gameEvent.Event.Type));
+                Assert.Contains(delivered, gameEvent =>
+                    gameEvent.Event.Seat == PlayerPosition.South.ToString()
+                    && gameEvent.Event.Automatic != true);
+                Assert.All(delivered, gameEvent =>
+                {
+                    if (gameEvent.Event.Seat is { } seat)
+                    {
+                        Assert.True(Enum.TryParse<PlayerPosition>(seat, out var parsedSeat));
+                        Assert.True(Enum.IsDefined(parsedSeat));
+                    }
+                });
+                Assert.All(delivered, gameEvent =>
+                {
+                    var json = JsonSerializer.Serialize(gameEvent);
+                    Assert.DoesNotContain("\"hand\"", json, StringComparison.OrdinalIgnoreCase);
+                    Assert.DoesNotContain("\"playableCards\"", json, StringComparison.OrdinalIgnoreCase);
+                    Assert.DoesNotContain("\"availableBids\"", json, StringComparison.OrdinalIgnoreCase);
+                    Assert.DoesNotContain("\"availableAnnounces\"", json, StringComparison.OrdinalIgnoreCase);
+                    Assert.DoesNotContain("\"beloteCards\"", json, StringComparison.OrdinalIgnoreCase);
+                    Assert.DoesNotContain("\"record\"", json, StringComparison.OrdinalIgnoreCase);
+                });
+
+                deliveredByClient.Add(delivered);
+            }
+
+            Assert.All(deliveredByClient.Skip(1), delivered =>
+                Assert.Equal(deliveredByClient[0].Select(gameEvent => gameEvent.Sequence), delivered.Select(gameEvent => gameEvent.Sequence)));
+
+            var nextSeat = Enum.Parse<PlayerPosition>(accepted.State.ToMove);
+            Assert.True(room.Members.TryGetValue(nextSeat, out var nextUserId));
+            var nextSnapshot = await this.GetSnapshotAsync(room.Room.RoomId, nextUserId!);
+            var nextAction = this.CreateAction(nextSnapshot, "realtime-second-action");
+            using (var nextResponse = await this.SendActionAsync(room.Room.RoomId, nextUserId!, nextAction))
+            {
+                Assert.Equal(HttpStatusCode.OK, nextResponse.StatusCode);
+                var nextAccepted = (await nextResponse.Content.ReadFromJsonAsync<MultiplayerGameActionResponse>(ApiJsonOptions))!;
+                Assert.Equal(accepted.Revision + 1, nextAccepted.Revision);
+                Assert.NotEmpty(nextAccepted.Events);
+                foreach (var channel in channels)
+                {
+                    var revisionEvents = new MultiplayerGameEventEnvelope[nextAccepted.Events.Count];
+                    for (var eventIndex = 0; eventIndex < revisionEvents.Length; eventIndex++)
+                    {
+                        revisionEvents[eventIndex] = await channel.Reader.ReadAsync()
+                            .AsTask()
+                            .WaitAsync(TimeSpan.FromSeconds(10));
+                    }
+
+                    Assert.All(revisionEvents, gameEvent => Assert.Equal(nextAccepted.Revision, gameEvent.Revision));
+                    Assert.Equal(
+                        Enumerable.Range(0, nextAccepted.Events.Count),
+                        revisionEvents.Select(gameEvent => gameEvent.Sequence));
+                }
+            }
+
+            using var duplicate = await this.SendActionAsync(room.Room.RoomId, southId, action);
+            Assert.Equal(HttpStatusCode.OK, duplicate.StatusCode);
+            var duplicateResult = (await duplicate.Content.ReadFromJsonAsync<MultiplayerGameActionResponse>(ApiJsonOptions))!;
+            Assert.Equal(accepted.Revision, duplicateResult.Revision);
+            await Task.Delay(100);
+            Assert.All(channels, channel => Assert.False(channel.Reader.TryRead(out _)));
+        }
+        finally
+        {
+            foreach (var connection in connections)
+            {
+                await connection.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task LobbyJoinReadyAndStartChangesAreBroadcastAsPublicEvents()
+    {
+        var hostId = Guid.NewGuid().ToString();
+        var created = await this.CreateLobbyAsync(hostId, new CreateMultiplayerRoomRequest
+        {
+            MaximumHumanPlayers = 2,
+            EastBot = "random",
+            NorthBot = "random",
+            WestBot = "random",
+        });
+        var hostChannel = Channel.CreateUnbounded<MultiplayerLobbyEventEnvelope>();
+        await using var hostConnection = this.CreateHubConnection(hostId);
+        hostConnection.On<MultiplayerLobbyEventEnvelope>(
+            "LobbyEvent",
+            lobbyEvent => hostChannel.Writer.TryWrite(lobbyEvent));
+        await hostConnection.StartAsync();
+        await hostConnection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+            "JoinRoom",
+            created.Room.RoomId,
+            created.Room.EventRevision,
+            created.Room.EventSequence);
+
+        var joiningUserId = Guid.NewGuid().ToString();
+        using var joinRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/lobbies/{created.Room.RoomId}/join",
+            ApiFactory.CreateAccessToken(joiningUserId));
+        joinRequest.Content = JsonContent.Create(new { invitationCode = created.InvitationCode, seat = PlayerPosition.East });
+        using var joined = await this.client.SendAsync(joinRequest);
+        Assert.Equal(HttpStatusCode.OK, joined.StatusCode);
+        var joinedRoom = (await joined.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+        var joinedEvent = await hostChannel.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("player-joined", joinedEvent.Type);
+        Assert.Equal(joinedRoom.YourSeat.ToString(), joinedEvent.Seat);
+        Assert.Equal(2, joinedEvent.HumanPlayerCount);
+
+        var joiningChannel = Channel.CreateUnbounded<MultiplayerLobbyEventEnvelope>();
+        await using var joiningConnection = this.CreateHubConnection(joiningUserId);
+        joiningConnection.On<MultiplayerLobbyEventEnvelope>(
+            "LobbyEvent",
+            lobbyEvent => joiningChannel.Writer.TryWrite(lobbyEvent));
+        await joiningConnection.StartAsync();
+        await joiningConnection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+            "JoinRoom",
+            created.Room.RoomId,
+            joinedRoom.EventRevision,
+            joinedRoom.EventSequence);
+
+        await this.SetReadyAsync(created.Room.RoomId, hostId, true);
+        var hostReadyEvent = await hostChannel.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("player-ready", hostReadyEvent.Type);
+        Assert.Equal(PlayerPosition.South.ToString(), hostReadyEvent.Seat);
+        var joiningObservedHostReady = await joiningChannel.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(PlayerPosition.South.ToString(), joiningObservedHostReady.Seat);
+        Assert.Equal(hostReadyEvent.Revision, joiningObservedHostReady.Revision);
+
+        await this.SetReadyAsync(created.Room.RoomId, joiningUserId, true);
+        var joiningReadyEvent = await joiningChannel.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("player-ready", joiningReadyEvent.Type);
+        Assert.Equal(joinedRoom.YourSeat.ToString(), joiningReadyEvent.Seat);
+        var hostObservedJoiningReady = await hostChannel.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(PlayerPosition.East.ToString(), hostObservedJoiningReady.Seat);
+        Assert.Equal(joiningReadyEvent.Revision, hostObservedJoiningReady.Revision);
+
+        using var startRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/lobbies/{created.Room.RoomId}/start",
+            ApiFactory.CreateAccessToken(hostId));
+        using var started = await this.client.SendAsync(startRequest);
+        Assert.Equal(HttpStatusCode.OK, started.StatusCode);
+        var startedRoom = (await started.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+        var startedForHost = await hostChannel.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        var startedForJoiner = await joiningChannel.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("game-started", startedForHost.Type);
+        Assert.Equal(startedForHost.Revision, startedForJoiner.Revision);
+        Assert.Equal(MultiplayerRoomStatus.Started, startedRoom.Status);
+        Assert.True(joinedEvent.Revision < hostReadyEvent.Revision);
+        Assert.True(hostReadyEvent.Revision < joiningReadyEvent.Revision);
+        Assert.True(joiningReadyEvent.Revision < startedForHost.Revision);
+        Assert.All(
+            new[] { joinedEvent, hostReadyEvent, joiningReadyEvent, startedForHost },
+            lobbyEvent => Assert.Equal(0, lobbyEvent.Sequence));
+
+        var publicJson = JsonSerializer.Serialize(startedForJoiner);
+        Assert.DoesNotContain(hostId, publicJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(joiningUserId, publicJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"hand\"", publicJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"invitationCode\"", publicJson, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ReconnectUsesFreshSnapshotAndSignalsWhenRequestedHistoryIsUnavailable()
+    {
+        var room = await this.CreateStartedRoomAsync(PlayerPosition.North);
+        var userId = room.Members[PlayerPosition.South];
+        var gameId = room.Room.RoomId;
+        var snapshot = await this.GetSnapshotAsync(gameId, userId);
+
+        await using (var firstConnection = this.CreateHubConnection(userId))
+        {
+            await firstConnection.StartAsync();
+            var firstSubscription = await firstConnection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+                "JoinGame",
+                gameId,
+                snapshot.Revision,
+                snapshot.LastEventSequence);
+            Assert.False(firstSubscription.SnapshotRequired);
+        }
+
+        var action = this.CreateAction(snapshot, "action-during-disconnect");
+        using var accepted = await this.SendActionAsync(gameId, userId, action);
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var actionResult = (await accepted.Content.ReadFromJsonAsync<MultiplayerGameActionResponse>(ApiJsonOptions))!;
+
+        var replayChannel = Channel.CreateUnbounded<MultiplayerGameEventEnvelope>();
+        var latestSnapshot = await this.GetSnapshotAsync(gameId, userId);
+        var reconnectChannel = Channel.CreateUnbounded<JsonElement>();
+        await using var reconnected = this.CreateHubConnection(userId);
+        reconnected.On<MultiplayerGameEventEnvelope>(
+            "GameEvent",
+            gameEvent => replayChannel.Writer.TryWrite(gameEvent));
+        reconnected.On<JsonElement>("SnapshotRequired", notice => reconnectChannel.Writer.TryWrite(notice));
+        await reconnected.StartAsync();
+        var replayedSubscription = await reconnected.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+            "JoinGame",
+            gameId,
+            snapshot.Revision,
+            snapshot.LastEventSequence);
+        Assert.False(replayedSubscription.SnapshotRequired);
+        var replayedEvents = new MultiplayerGameEventEnvelope[actionResult.Events.Count];
+        for (var eventIndex = 0; eventIndex < replayedEvents.Length; eventIndex++)
+        {
+            replayedEvents[eventIndex] = await replayChannel.Reader.ReadAsync()
+                .AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(10));
+        }
+
+        Assert.Equal(actionResult.Events.Select(gameEvent => gameEvent.Sequence), replayedEvents.Select(gameEvent => gameEvent.Sequence));
+
+        var staleSubscription = await reconnected.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+            "JoinGame",
+            gameId,
+            latestSnapshot.Revision + 10,
+            0);
+        Assert.True(staleSubscription.SnapshotRequired);
+        var notice = await reconnectChannel.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("game", notice.GetProperty("resourceType").GetString());
+        var refreshedSnapshot = await this.GetSnapshotAsync(gameId, userId);
+
+        var currentSubscription = await reconnected.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+            "JoinGame",
+            gameId,
+            refreshedSnapshot.Revision,
+            refreshedSnapshot.LastEventSequence);
+        Assert.False(currentSubscription.SnapshotRequired);
+    }
+
+    [Fact]
+    public async Task HubSignalsSnapshotRequiredWhenRetainedGameHistoryHasBeenEvicted()
+    {
+        var room = await this.CreateStartedRoomAsync(PlayerPosition.North);
+        var gameId = room.Room.RoomId;
+        var userId = room.Members[PlayerPosition.South];
+        var initialSnapshot = await this.GetSnapshotAsync(gameId, userId);
+        var action = this.CreateAction(initialSnapshot, "overflow-retained-events");
+        using var acceptedResponse = await this.SendActionAsync(gameId, userId, action);
+        Assert.Equal(HttpStatusCode.OK, acceptedResponse.StatusCode);
+        var accepted = (await acceptedResponse.Content.ReadFromJsonAsync<MultiplayerGameActionResponse>(ApiJsonOptions))!;
+        Assert.True(accepted.Events.Count < 33);
+
+        var additionalEvents = Enumerable.Range(accepted.Events.Count, 33 - accepted.Events.Count)
+            .Select(sequence => new PublicGameEventDto(
+                sequence,
+                "bid",
+                1,
+                PlayerPosition.South.ToString()))
+            .ToArray();
+        await this.factory.Services.GetRequiredService<IMultiplayerRealtimePublisher>()
+            .PublishGameEventsAsync(gameId, accepted.Revision, additionalEvents, CancellationToken.None);
+
+        var notices = Channel.CreateUnbounded<JsonElement>();
+        await using var connection = this.CreateHubConnection(userId);
+        connection.On<JsonElement>("SnapshotRequired", notice => notices.Writer.TryWrite(notice));
+        await connection.StartAsync();
+        var subscription = await connection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+            "JoinGame",
+            gameId,
+            initialSnapshot.Revision,
+            initialSnapshot.LastEventSequence);
+
+        Assert.True(subscription.SnapshotRequired);
+        var notice = await notices.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("game", notice.GetProperty("resourceType").GetString());
+        Assert.Equal(accepted.Revision, notice.GetProperty("revision").GetInt64());
+        Assert.Equal(32, notice.GetProperty("sequence").GetInt32());
+    }
+
+    [Fact]
+    public async Task AnotherRoomMemberCanResumePendingBotsWithoutReceivingOriginalPrivateResponse()
+    {
+        var room = await this.CreateStartedRoomAsync(PlayerPosition.North);
+        var gameId = room.Room.RoomId;
+        var game = this.factory.Services.GetRequiredService<MultiplayerGameStore>().Find(gameId);
+        Assert.NotNull(game);
+        game!.Players[PlayerPosition.East.Index()] = new FailOncePlayer();
+
+        var northId = room.Members[PlayerPosition.North];
+        var northEvents = Channel.CreateUnbounded<MultiplayerGameEventEnvelope>();
+        await using var northConnection = this.CreateHubConnection(northId);
+        northConnection.On<MultiplayerGameEventEnvelope>(
+            "GameEvent",
+            gameEvent => northEvents.Writer.TryWrite(gameEvent));
+        await northConnection.StartAsync();
+        var northSnapshot = await this.GetSnapshotAsync(gameId, northId);
+        await northConnection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+            "JoinGame",
+            gameId,
+            northSnapshot.Revision,
+            northSnapshot.LastEventSequence);
+
+        var southId = room.Members[PlayerPosition.South];
+        var action = this.CreateAction(await this.GetSnapshotAsync(gameId, southId), "resume-by-partner");
+        using (var failed = await this.SendActionAsync(gameId, southId, action))
+        {
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, failed.StatusCode);
+        }
+
+        var humanActionEvent = await northEvents.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(PlayerPosition.South.ToString(), humanActionEvent.Event.Seat);
+
+        using var resumeRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/games/{gameId}/automation/resume",
+            ApiFactory.CreateAccessToken(northId));
+        using var resumed = await this.client.SendAsync(resumeRequest);
+        Assert.Equal(HttpStatusCode.OK, resumed.StatusCode);
+        var responseBody = await resumed.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("\"state\"", responseBody, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"hand\"", responseBody, StringComparison.OrdinalIgnoreCase);
+        var automation = JsonSerializer.Deserialize<MultiplayerAutomationResponse>(responseBody, ApiJsonOptions)!;
+        Assert.Equal(1, automation.Revision);
+        Assert.False(automation.AutomationPending);
+
+        var botEvent = await northEvents.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(PlayerPosition.East.ToString(), botEvent.Event.Seat);
+        Assert.True(botEvent.Event.Automatic);
+
+        using var originalRetry = await this.SendActionAsync(gameId, southId, action);
+        Assert.Equal(HttpStatusCode.OK, originalRetry.StatusCode);
+        var retried = (await originalRetry.Content.ReadFromJsonAsync<MultiplayerGameActionResponse>(ApiJsonOptions))!;
+        Assert.Single(retried.Events.Where(gameEvent => gameEvent.Seat == PlayerPosition.South.ToString()));
+        Assert.Equal(1, (await this.GetSnapshotAsync(gameId, southId)).Revision);
+    }
+
+    [Fact]
+    public async Task SignalRDeliveryFailureDoesNotRollBackOrRepeatAnAcceptedAction()
+    {
+        using var failingFactory = new ApiFactory(failRealtimeGameDelivery: true);
+        using var failingClient = failingFactory.CreateClient();
+        var southId = Guid.NewGuid().ToString();
+        var creation = await this.CreateLobbyAsync(failingClient, southId, new CreateMultiplayerRoomRequest
+        {
+            MaximumHumanPlayers = 2,
+            EastBot = "random",
+            NorthBot = "random",
+            WestBot = "random",
+        });
+        var northId = Guid.NewGuid().ToString();
+        await this.JoinLobbyAsync(failingClient, creation.Room.RoomId, creation.InvitationCode, northId, PlayerPosition.North);
+        await this.SetReadyAsync(failingClient, creation.Room.RoomId, southId, true);
+        await this.SetReadyAsync(failingClient, creation.Room.RoomId, northId, true);
+        await this.StartLobbyAsync(failingClient, creation.Room.RoomId, southId);
+        var snapshot = await this.GetSnapshotAsync(failingClient, creation.Room.RoomId, southId);
+        var action = this.CreateAction(snapshot, "publish-failure-does-not-repeat");
+
+        using var accepted = await this.SendActionAsync(failingClient, creation.Room.RoomId, southId, action);
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        using var retry = await this.SendActionAsync(failingClient, creation.Room.RoomId, southId, action);
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        var result = (await retry.Content.ReadFromJsonAsync<MultiplayerGameActionResponse>(ApiJsonOptions))!;
+        Assert.Equal(1, result.Revision);
+        var current = await this.GetSnapshotAsync(failingClient, creation.Room.RoomId, southId);
+        Assert.Equal(1, current.Revision);
+        Assert.Single(current.State.Bids.Where(bid => bid.Seat == PlayerPosition.South.ToString()));
+    }
+
+    [Fact]
     public async Task StartedLobbyWithoutItsProcessLocalMatchReportsUnavailableAfterRestart()
     {
         var room = await this.CreateStartedRoomAsync(PlayerPosition.East);
@@ -447,6 +895,32 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
             },
             _ => throw new InvalidOperationException($"Unexpected decision: {snapshot.State.Decision}."),
         };
+
+    private HubConnection CreateHubConnection(string? userId)
+    {
+        var accessToken = userId is null ? null : ApiFactory.CreateAccessToken(userId);
+        return new HubConnectionBuilder()
+            .WithUrl("http://localhost/hubs/multiplayer", options =>
+            {
+                options.Transports = HttpTransportType.WebSockets;
+                options.SkipNegotiation = true;
+                options.AccessTokenProvider = () => Task.FromResult(accessToken);
+                options.WebSocketFactory = async (context, cancellationToken) =>
+                {
+                    var webSocketClient = this.factory.Server.CreateWebSocketClient();
+                    if (accessToken is not null)
+                    {
+                        webSocketClient.ConfigureRequest = request =>
+                            request.Headers["Authorization"] = $"Bearer {accessToken}";
+                    }
+
+                    return await webSocketClient.ConnectAsync(context.Uri, cancellationToken);
+                };
+            })
+            .AddJsonProtocol(options =>
+                options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()))
+            .Build();
+    }
 
     private int CountProperty(string json, string propertyName)
     {
@@ -531,24 +1005,39 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
     private async Task<CreateMultiplayerRoomResponse> CreateLobbyAsync(
         string userId,
         CreateMultiplayerRoomRequest request)
+        => await this.CreateLobbyAsync(this.client, userId, request);
+
+    private async Task SetReadyAsync(string roomId, string userId, bool isReady)
+        => await this.SetReadyAsync(this.client, roomId, userId, isReady);
+
+    private async Task<CreateMultiplayerRoomResponse> CreateLobbyAsync(
+        HttpClient client,
+        string userId,
+        CreateMultiplayerRoomRequest request)
     {
         using var createRequest = ApiFactory.CreateAuthenticatedRequest(
             HttpMethod.Post,
             "/api/multiplayer/lobbies",
             ApiFactory.CreateAccessToken(userId));
         createRequest.Content = JsonContent.Create(request);
-        using var response = await this.client.SendAsync(createRequest);
+        using var response = await client.SendAsync(createRequest);
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         return (await response.Content.ReadFromJsonAsync<CreateMultiplayerRoomResponse>(ApiJsonOptions))!;
     }
 
     private async Task<MultiplayerGameSnapshotDto> GetSnapshotAsync(string gameId, string userId)
+        => await this.GetSnapshotAsync(this.client, gameId, userId);
+
+    private async Task<MultiplayerGameSnapshotDto> GetSnapshotAsync(
+        HttpClient client,
+        string gameId,
+        string userId)
     {
         using var request = ApiFactory.CreateAuthenticatedRequest(
             HttpMethod.Get,
             $"/api/multiplayer/games/{gameId}",
             ApiFactory.CreateAccessToken(userId));
-        using var response = await this.client.SendAsync(request);
+        using var response = await client.SendAsync(request);
         Assert.True(
             response.StatusCode == HttpStatusCode.OK,
             $"Snapshot for {userId} returned {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
@@ -565,13 +1054,57 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
         string gameId,
         string userId,
         MultiplayerGameActionRequest action)
+        => this.SendActionAsync(this.client, gameId, userId, action);
+
+    private Task<HttpResponseMessage> SendActionAsync(
+        HttpClient client,
+        string gameId,
+        string userId,
+        MultiplayerGameActionRequest action)
     {
         var request = ApiFactory.CreateAuthenticatedRequest(
             HttpMethod.Post,
             $"/api/multiplayer/games/{gameId}/actions",
             ApiFactory.CreateAccessToken(userId));
         request.Content = JsonContent.Create(action, options: ApiJsonOptions);
-        return this.client.SendAsync(request);
+        return client.SendAsync(request);
+    }
+
+    private async Task JoinLobbyAsync(
+        HttpClient client,
+        string roomId,
+        string invitationCode,
+        string userId,
+        PlayerPosition seat)
+    {
+        using var request = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/lobbies/{roomId}/join",
+            ApiFactory.CreateAccessToken(userId));
+        request.Content = JsonContent.Create(new { invitationCode, seat });
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    private async Task SetReadyAsync(HttpClient client, string roomId, string userId, bool isReady)
+    {
+        using var request = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/lobbies/{roomId}/ready",
+            ApiFactory.CreateAccessToken(userId));
+        request.Content = JsonContent.Create(new { isReady });
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    private async Task StartLobbyAsync(HttpClient client, string roomId, string userId)
+    {
+        using var request = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/lobbies/{roomId}/start",
+            ApiFactory.CreateAccessToken(userId));
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     private ActiveMultiplayerGame CreateStoreGame(string gameId)

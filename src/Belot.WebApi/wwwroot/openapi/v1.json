@@ -3,7 +3,7 @@
   "info": {
     "title": "Belot Game API",
     "version": "v1",
-    "description": "Play a solo match against the original BelotGameEngine bots or create a private multiplayer lobby. Multiplayer lobby routes require a Supabase access token. All JSON property names are camelCase."
+    "description": "Play a solo match against the original BelotGameEngine bots or create a private multiplayer lobby. Multiplayer lobby and game routes require a Supabase access token. Realtime notifications use the authenticated SignalR hub at /hubs/multiplayer; see MULTIPLAYER_A06.md for its subscription and event contract. REST remains authoritative for actions and private seat snapshots. All JSON property names are camelCase."
   },
   "servers": [
     {
@@ -298,6 +298,40 @@
             }
           },
           "400": { "$ref": "#/components/responses/InvalidMultiplayerGameAction" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/MultiplayerGameConflict" },
+          "410": { "$ref": "#/components/responses/MultiplayerGameUnavailable" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/MultiplayerGameServiceUnavailable" }
+        }
+      }
+    },
+    "/api/multiplayer/games/{gameId}/automation/resume": {
+      "parameters": [
+        {
+          "name": "gameId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" },
+          "description": "Opaque lobby/game ID returned when the host starts the lobby."
+        }
+      ],
+      "post": {
+        "operationId": "resumeMultiplayerAutomation",
+        "summary": "Resume pending automatic game actions",
+        "description": "Any authenticated room member may request bounded recovery after a bot failure, including when the original submitting member disconnects. This route does not replay the human action or return a private seat snapshot.",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Automatic actions are complete, or no bot action was pending.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MultiplayerAutomationResponse" }
+              }
+            }
+          },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" },
@@ -676,7 +710,7 @@
         }
       },
       "MultiplayerGameServiceUnavailable": {
-        "description": "A bot failed to decide after the human action was accepted. The response includes the advanced currentRevision; retry the identical request with the same idempotencyKey to resume bot actions.",
+        "description": "A bot failed to decide or bounded automatic processing remains pending. An action response includes the advanced currentRevision; retry the identical action with the same idempotencyKey, or let any room member call the automation/resume route.",
         "content": {
           "application/json": {
             "schema": { "$ref": "#/components/schemas/MultiplayerGameError" },
@@ -726,12 +760,17 @@
       },
       "MultiplayerGameSnapshot": {
         "type": "object",
-        "required": ["gameId", "revision", "yourSeat", "state"],
+        "required": ["gameId", "revision", "yourSeat", "state", "lastEventSequence"],
         "properties": {
           "gameId": { "type": "string" },
           "revision": { "type": "integer", "format": "int64", "minimum": 0 },
           "yourSeat": { "type": "string", "enum": ["South", "East", "North", "West"] },
-          "state": { "$ref": "#/components/schemas/GameState" }
+          "state": { "$ref": "#/components/schemas/GameState" },
+          "lastEventSequence": {
+            "type": "integer",
+            "minimum": -1,
+            "description": "Sequence cursor supplied to JoinGame. A value of -1 means no sequence is available from the current in-memory journal; the REST state remains authoritative."
+          }
         }
       },
       "MultiplayerGameActionRequest": {
@@ -770,6 +809,17 @@
             "type": "array",
             "items": { "$ref": "#/components/schemas/PublicGameEvent" },
             "description": "Ordered public events produced by the accepted human action and any automatic bot actions."
+          }
+        }
+      },
+      "MultiplayerAutomationResponse": {
+        "type": "object",
+        "required": ["revision", "automationPending"],
+        "properties": {
+          "revision": { "type": "integer", "format": "int64", "minimum": 0 },
+          "automationPending": {
+            "type": "boolean",
+            "description": "False when the request completed successfully; an incomplete recovery is returned as HTTP 503."
           }
         }
       },

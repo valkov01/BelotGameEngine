@@ -36,6 +36,12 @@
                 .Produces<MultiplayerGameActionResponse>(StatusCodes.Status200OK)
                 .Produces<MultiplayerGameErrorDto>(StatusCodes.Status409Conflict)
                 .Produces<MultiplayerGameErrorDto>(StatusCodes.Status410Gone);
+            group.MapPost("/games/{gameId}/automation/resume", ResumeAutomationAsync)
+                .WithName("ResumeMultiplayerAutomation")
+                .WithSummary("Resume pending automatic game actions")
+                .WithDescription("Any authenticated room member may request bounded bot recovery after a bot failure. The response contains no seat snapshot.")
+                .Produces<MultiplayerAutomationResponse>(StatusCodes.Status200OK)
+                .Produces<MultiplayerGameErrorDto>(StatusCodes.Status503ServiceUnavailable);
 
             return group;
         }
@@ -44,6 +50,7 @@
             [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] CreateMultiplayerRoomRequest? request,
             ClaimsPrincipal caller,
             IRoomMembershipService rooms,
+            IMultiplayerRealtimePublisher realtime,
             CancellationToken cancellationToken)
         {
             var result = await rooms.CreateRoomAsync(caller, request ?? new CreateMultiplayerRoomRequest(), cancellationToken);
@@ -51,7 +58,7 @@
                 ? Results.Created(
                     $"/api/multiplayer/lobbies/{result.Room!.RoomId}",
                     new CreateMultiplayerRoomResponse(
-                        MultiplayerRoomMapper.ToDto(result.Room, caller.FindFirst("sub")!.Value),
+                        ToRoomDto(result.Room, caller, realtime),
                         result.InvitationCode!))
                 : ToProblem(result);
         }
@@ -61,13 +68,15 @@
             ClaimsPrincipal caller,
             IRoomMembershipService rooms,
             IMultiplayerGameService games,
+            IMultiplayerRealtimePublisher realtime,
             CancellationToken cancellationToken)
         {
             var result = await rooms.GetRoomAsync(caller, roomId, cancellationToken);
             return result.Status == MultiplayerRoomServiceStatus.Success
-                ? Results.Ok(MultiplayerRoomMapper.ToDto(
+                ? Results.Ok(ToRoomDto(
                     result.Room!,
-                    caller.FindFirst("sub")!.Value,
+                    caller,
+                    realtime,
                     result.Room!.Status == MultiplayerRoomStatus.Started && games.IsGameAvailable(roomId)))
                 : ToProblem(result);
         }
@@ -77,12 +86,24 @@
             JoinMultiplayerRoomRequest? request,
             ClaimsPrincipal caller,
             ISeatAssignmentService assignments,
+            IMultiplayerRealtimePublisher realtime,
             CancellationToken cancellationToken)
         {
             var result = await assignments.AssignSeatAsync(caller, roomId, request, cancellationToken);
-            return result.Status == MultiplayerRoomServiceStatus.Success
-                ? Results.Ok(MultiplayerRoomMapper.ToDto(result.Room!, caller.FindFirst("sub")!.Value))
-                : ToProblem(result);
+            if (result.Status != MultiplayerRoomServiceStatus.Success)
+            {
+                return ToProblem(result);
+            }
+
+            var userId = caller.FindFirst("sub")!.Value;
+            var room = result.Room!;
+            var seat = room.Members.Single(member => member.UserId == userId).Seat;
+            await realtime.PublishLobbyChangeAsync(
+                room,
+                "player-joined",
+                seat,
+                CancellationToken.None);
+            return Results.Ok(ToRoomDto(room, caller, realtime));
         }
 
         private static async Task<IResult> SetReadyAsync(
@@ -90,6 +111,7 @@
             SetMultiplayerReadyRequest? request,
             ClaimsPrincipal caller,
             ISeatAssignmentService assignments,
+            IMultiplayerRealtimePublisher realtime,
             CancellationToken cancellationToken)
         {
             if (request is null)
@@ -98,21 +120,40 @@
             }
 
             var result = await assignments.SetReadyAsync(caller, roomId, request.IsReady, cancellationToken);
-            return result.Status == MultiplayerRoomServiceStatus.Success
-                ? Results.Ok(MultiplayerRoomMapper.ToDto(result.Room!, caller.FindFirst("sub")!.Value))
-                : ToProblem(result);
+            if (result.Status != MultiplayerRoomServiceStatus.Success)
+            {
+                return ToProblem(result);
+            }
+
+            var userId = caller.FindFirst("sub")!.Value;
+            var seat = result.Room!.Members.Single(member => member.UserId == userId).Seat;
+            await realtime.PublishLobbyChangeAsync(
+                result.Room,
+                request.IsReady ? "player-ready" : "player-not-ready",
+                seat,
+                CancellationToken.None);
+            return Results.Ok(ToRoomDto(result.Room, caller, realtime));
         }
 
         private static async Task<IResult> StartAsync(
             string roomId,
             ClaimsPrincipal caller,
             IMultiplayerGameService games,
+            IMultiplayerRealtimePublisher realtime,
             CancellationToken cancellationToken)
         {
             var result = await games.StartAsync(caller, roomId, cancellationToken);
-            return result.Status == MultiplayerGameServiceStatus.Success
-                ? Results.Ok(MultiplayerRoomMapper.ToDto(result.Room!, caller.FindFirst("sub")!.Value, isGameAvailable: true))
-                : ToGameProblem(result);
+            if (result.Status != MultiplayerGameServiceStatus.Success)
+            {
+                return ToGameProblem(result);
+            }
+
+            await realtime.PublishLobbyChangeAsync(
+                result.Room!,
+                "game-started",
+                null,
+                CancellationToken.None);
+            return Results.Ok(ToRoomDto(result.Room!, caller, realtime, isGameAvailable: true));
         }
 
         private static async Task<IResult> GetGameAsync(
@@ -140,6 +181,29 @@
                 : ToGameProblem(result);
         }
 
+        private static async Task<IResult> ResumeAutomationAsync(
+            string gameId,
+            ClaimsPrincipal caller,
+            IMultiplayerGameService games,
+            CancellationToken cancellationToken)
+        {
+            var result = await games.ResumeAutomaticMovesAsync(caller, gameId, cancellationToken);
+            return result.Status == MultiplayerGameServiceStatus.Success
+                ? Results.Ok(new MultiplayerAutomationResponse(result.CurrentRevision!.Value, result.AutomationPending))
+                : ToAutomationProblem(result);
+        }
+
+        private static MultiplayerRoomDto ToRoomDto(
+            MultiplayerRoom room,
+            ClaimsPrincipal caller,
+            IMultiplayerRealtimePublisher realtime,
+            bool isGameAvailable = false) =>
+            MultiplayerRoomMapper.ToDto(
+                room,
+                caller.FindFirst("sub")!.Value,
+                isGameAvailable,
+                realtime.GetLobbyCursor(room.RoomId));
+
         private static IResult ToProblem(MultiplayerRoomServiceResult result) => result.Status switch
         {
             MultiplayerRoomServiceStatus.Unauthorized => Results.Unauthorized(),
@@ -166,6 +230,22 @@
                 new MultiplayerGameErrorDto(result.Error ?? "The multiplayer game service is temporarily unavailable.", result.CurrentRevision),
                 statusCode: StatusCodes.Status503ServiceUnavailable),
             _ => throw new InvalidOperationException($"Unexpected game service result: {result.Status}."),
+        };
+
+        private static IResult ToAutomationProblem(MultiplayerAutomationServiceResult result) => result.Status switch
+        {
+            MultiplayerGameServiceStatus.Unauthorized => Results.Unauthorized(),
+            MultiplayerGameServiceStatus.Forbidden => Results.Forbid(),
+            MultiplayerGameServiceStatus.NotFound => Results.NotFound(new ApiError("Game not found.")),
+            MultiplayerGameServiceStatus.Conflict => Results.Conflict(
+                new MultiplayerGameErrorDto(result.Error ?? "Automatic actions cannot be resumed in this game state.", result.CurrentRevision)),
+            MultiplayerGameServiceStatus.Gone => Results.Json(
+                new MultiplayerGameErrorDto(result.Error ?? "The in-memory match is unavailable.", null),
+                statusCode: StatusCodes.Status410Gone),
+            MultiplayerGameServiceStatus.Unavailable => Results.Json(
+                new MultiplayerGameErrorDto(result.Error ?? "Automatic actions remain pending.", result.CurrentRevision),
+                statusCode: StatusCodes.Status503ServiceUnavailable),
+            _ => throw new InvalidOperationException($"Unexpected automation service result: {result.Status}."),
         };
     }
 }

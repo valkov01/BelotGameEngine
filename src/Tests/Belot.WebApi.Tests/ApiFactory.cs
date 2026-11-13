@@ -45,18 +45,26 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     private readonly string? multiplayerConnectionString;
 
+    private readonly int? realtimeEventsPerGame;
+
+    private readonly bool failRealtimeGameDelivery;
+
     public ApiFactory(
         bool revealHandsEnabled = false,
         string? debugAccessKey = null,
         bool useEcdsaSigningKey = false,
         string? jwtSecret = null,
-        string? multiplayerConnectionString = null)
+        string? multiplayerConnectionString = null,
+        int? realtimeEventsPerGame = null,
+        bool failRealtimeGameDelivery = false)
     {
         this.revealHandsEnabled = revealHandsEnabled;
         this.debugAccessKey = debugAccessKey;
         this.useEcdsaSigningKey = useEcdsaSigningKey;
         this.jwtSecret = jwtSecret;
         this.multiplayerConnectionString = multiplayerConnectionString;
+        this.realtimeEventsPerGame = realtimeEventsPerGame;
+        this.failRealtimeGameDelivery = failRealtimeGameDelivery;
     }
 
     public static string CreateAccessToken(
@@ -106,6 +114,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 ["Authentication:Supabase:Audience"] = TestAudience,
                 ["Authentication:Supabase:JwtSecret"] = this.jwtSecret,
                 ["Multiplayer:PostgresConnectionString"] = this.multiplayerConnectionString,
+                ["Multiplayer:Realtime:EventsPerGame"] = this.realtimeEventsPerGame?.ToString(),
             }));
 
         builder.ConfigureTestServices(services =>
@@ -147,6 +156,71 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                     ClockSkew = TimeSpan.Zero,
                 };
             });
+
+            if (this.failRealtimeGameDelivery)
+            {
+                services.AddSingleton<IMultiplayerRealtimePublisher>(provider =>
+                    new FailingRealtimePublisher(
+                        provider.GetRequiredService<MultiplayerRealtimePublisher>()));
+            }
         });
+    }
+
+    private sealed class FailingRealtimePublisher : IMultiplayerRealtimePublisher
+    {
+        private readonly IMultiplayerRealtimePublisher publisher;
+
+        public FailingRealtimePublisher(IMultiplayerRealtimePublisher publisher)
+        {
+            this.publisher = publisher;
+        }
+
+        public MultiplayerEventCursor GetGameCursor(string gameId, long revision) =>
+            this.publisher.GetGameCursor(gameId, revision);
+
+        public MultiplayerEventCursor GetLobbyCursor(string roomId) =>
+            this.publisher.GetLobbyCursor(roomId);
+
+        public Task PublishGameEventsAsync(
+            string gameId,
+            long revision,
+            IReadOnlyList<PublicGameEventDto> events,
+            CancellationToken cancellationToken) =>
+            Task.FromException(new IOException("Simulated SignalR delivery failure."));
+
+        public Task PublishLobbyChangeAsync(
+            MultiplayerRoom room,
+            string type,
+            Belot.Engine.Players.PlayerPosition? seat,
+            CancellationToken cancellationToken) =>
+            this.publisher.PublishLobbyChangeAsync(room, type, seat, cancellationToken);
+
+        public Task<MultiplayerRealtimeSubscriptionResult> SubscribeGameAsync(
+            string connectionId,
+            string gameId,
+            long afterRevision,
+            int afterSequence,
+            long currentRevision,
+            CancellationToken cancellationToken) =>
+            this.publisher.SubscribeGameAsync(
+                connectionId,
+                gameId,
+                afterRevision,
+                afterSequence,
+                currentRevision,
+                cancellationToken);
+
+        public Task<MultiplayerRealtimeSubscriptionResult> SubscribeRoomAsync(
+            string connectionId,
+            string roomId,
+            long afterRevision,
+            int afterSequence,
+            CancellationToken cancellationToken) =>
+            this.publisher.SubscribeRoomAsync(
+                connectionId,
+                roomId,
+                afterRevision,
+                afterSequence,
+                cancellationToken);
     }
 }
