@@ -69,17 +69,21 @@
             IRoomMembershipService rooms,
             IMultiplayerGameService games,
             IMultiplayerRealtimePublisher realtime,
-            CancellationToken cancellationToken)
-        {
-            var result = await rooms.GetRoomAsync(caller, roomId, cancellationToken);
-            return result.Status == MultiplayerRoomServiceStatus.Success
-                ? Results.Ok(ToRoomDto(
-                    result.Room!,
-                    caller,
-                    realtime,
-                    result.Room!.Status == MultiplayerRoomStatus.Started && games.IsGameAvailable(roomId)))
-                : ToProblem(result);
-        }
+            CancellationToken cancellationToken) =>
+            await realtime.WithLobbyLockAsync(
+                roomId,
+                async () =>
+                {
+                    var result = await rooms.GetRoomAsync(caller, roomId, cancellationToken);
+                    return result.Status == MultiplayerRoomServiceStatus.Success
+                        ? Results.Ok(ToRoomDto(
+                            result.Room!,
+                            caller,
+                            realtime,
+                            result.Room!.Status == MultiplayerRoomStatus.Started && games.IsGameAvailable(roomId)))
+                        : ToProblem(result);
+                },
+                cancellationToken);
 
         private static async Task<IResult> JoinAsync(
             string roomId,
@@ -87,24 +91,28 @@
             ClaimsPrincipal caller,
             ISeatAssignmentService assignments,
             IMultiplayerRealtimePublisher realtime,
-            CancellationToken cancellationToken)
-        {
-            var result = await assignments.AssignSeatAsync(caller, roomId, request, cancellationToken);
-            if (result.Status != MultiplayerRoomServiceStatus.Success)
-            {
-                return ToProblem(result);
-            }
+            CancellationToken cancellationToken) =>
+            await realtime.WithLobbyLockAsync(
+                roomId,
+                async () =>
+                {
+                    var result = await assignments.AssignSeatAsync(caller, roomId, request, cancellationToken);
+                    if (result.Status != MultiplayerRoomServiceStatus.Success)
+                    {
+                        return ToProblem(result);
+                    }
 
-            var userId = caller.FindFirst("sub")!.Value;
-            var room = result.Room!;
-            var seat = room.Members.Single(member => member.UserId == userId).Seat;
-            await realtime.PublishLobbyChangeAsync(
-                room,
-                "player-joined",
-                seat,
-                CancellationToken.None);
-            return Results.Ok(ToRoomDto(room, caller, realtime));
-        }
+                    var userId = caller.FindFirst("sub")!.Value;
+                    var room = result.Room!;
+                    var seat = room.Members.Single(member => member.UserId == userId).Seat;
+                    await realtime.PublishLobbyChangeAsync(
+                        room,
+                        "player-joined",
+                        seat,
+                        CancellationToken.None);
+                    return Results.Ok(ToRoomDto(room, caller, realtime));
+                },
+                cancellationToken);
 
         private static async Task<IResult> SetReadyAsync(
             string roomId,
@@ -112,49 +120,58 @@
             ClaimsPrincipal caller,
             ISeatAssignmentService assignments,
             IMultiplayerRealtimePublisher realtime,
-            CancellationToken cancellationToken)
-        {
-            if (request is null)
-            {
-                return Results.BadRequest(new ApiError("Provide the desired ready state."));
-            }
+            CancellationToken cancellationToken) =>
+            await realtime.WithLobbyLockAsync(
+                roomId,
+                async () =>
+                {
+                    if (request is null)
+                    {
+                        return Results.BadRequest(new ApiError("Provide the desired ready state."));
+                    }
 
-            var result = await assignments.SetReadyAsync(caller, roomId, request.IsReady, cancellationToken);
-            if (result.Status != MultiplayerRoomServiceStatus.Success)
-            {
-                return ToProblem(result);
-            }
+                    var result = await assignments.SetReadyAsync(caller, roomId, request.IsReady, cancellationToken);
+                    if (result.Status != MultiplayerRoomServiceStatus.Success)
+                    {
+                        return ToProblem(result);
+                    }
 
-            var userId = caller.FindFirst("sub")!.Value;
-            var seat = result.Room!.Members.Single(member => member.UserId == userId).Seat;
-            await realtime.PublishLobbyChangeAsync(
-                result.Room,
-                request.IsReady ? "player-ready" : "player-not-ready",
-                seat,
-                CancellationToken.None);
-            return Results.Ok(ToRoomDto(result.Room, caller, realtime));
-        }
+                    var userId = caller.FindFirst("sub")!.Value;
+                    var room = result.Room!;
+                    var seat = room.Members.Single(member => member.UserId == userId).Seat;
+                    await realtime.PublishLobbyChangeAsync(
+                        room,
+                        request.IsReady ? "player-ready" : "player-not-ready",
+                        seat,
+                        CancellationToken.None);
+                    return Results.Ok(ToRoomDto(room, caller, realtime));
+                },
+                cancellationToken);
 
         private static async Task<IResult> StartAsync(
             string roomId,
             ClaimsPrincipal caller,
             IMultiplayerGameService games,
             IMultiplayerRealtimePublisher realtime,
-            CancellationToken cancellationToken)
-        {
-            var result = await games.StartAsync(caller, roomId, cancellationToken);
-            if (result.Status != MultiplayerGameServiceStatus.Success)
-            {
-                return ToGameProblem(result);
-            }
+            CancellationToken cancellationToken) =>
+            await realtime.WithLobbyLockAsync(
+                roomId,
+                async () =>
+                {
+                    var result = await games.StartAsync(caller, roomId, cancellationToken);
+                    if (result.Status != MultiplayerGameServiceStatus.Success)
+                    {
+                        return ToGameProblem(result);
+                    }
 
-            await realtime.PublishLobbyChangeAsync(
-                result.Room!,
-                "game-started",
-                null,
-                CancellationToken.None);
-            return Results.Ok(ToRoomDto(result.Room!, caller, realtime, isGameAvailable: true));
-        }
+                    await realtime.PublishLobbyChangeAsync(
+                        result.Room!,
+                        "game-started",
+                        null,
+                        CancellationToken.None);
+                    return Results.Ok(ToRoomDto(result.Room!, caller, realtime, isGameAvailable: true));
+                },
+                cancellationToken);
 
         private static async Task<IResult> GetGameAsync(
             string gameId,

@@ -129,8 +129,20 @@ connection.on("SnapshotRequired", notice => { /* fetch REST state and resubscrib
 `game-started`. `seat` is null for `game-started`. The event contains no user
 IDs or invitation code. Lobby `revision` is process-wide and can jump because
 changes in other rooms also advance it; do not infer missing room events from
-numeric revision gaps. Use `SnapshotRequired` and the room REST snapshot for
-recovery.
+numeric revision gaps. Lobby event `sequence` is currently zero. The room
+REST response's `eventRevision` and `eventSequence` are captured with its seat
+state under the same per-room serialization gate used by join, ready, and
+start operations. Apply a REST lobby response only when its cursor is not older
+than the latest lobby cursor already rendered; this prevents a late HTTP
+response from overwriting state learned from a newer realtime event.
+
+Within retained history, a lobby cursor is valid only when it is the room's
+baseline or an actual event cursor. A client with a stale cursor after journal
+eviction receives `SnapshotRequired`; fetching the room REST snapshot
+re-establishes a cursor baseline, and subscribing with that returned cursor
+does not cause a repeated snapshot-required loop. Numeric gaps caused by
+changes in other rooms do not cause false gap notices. Use `SnapshotRequired`
+and the room REST snapshot for recovery.
 
 `GameEvent` carries one public action:
 
@@ -199,7 +211,10 @@ Event journals are process-local and bounded: by default the API keeps at most
 `Multiplayer:Realtime:EventsPerGame` from 32 to 4096 and
 `Multiplayer:Realtime:EventsPerLobby` from 16 to 1024. At most 512 topic
 journals are retained; evicting a journal does not remove a match or lobby,
-and clients recover through a fresh REST snapshot. The authoritative game
+and clients recover through one fresh REST snapshot, which seeds the journal's
+new cursor baseline. A fixed set of 64 per-room lock stripes bounds lock
+memory; hash collisions may serialize unrelated lobby operations. The
+authoritative game
 store has its own separate active-game capacity and completed-game retention
 policy documented in `MULTIPLAYER_A05_1.md`.
 

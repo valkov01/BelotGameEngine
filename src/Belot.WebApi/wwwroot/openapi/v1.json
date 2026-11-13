@@ -928,7 +928,9 @@
           "yourSeat",
           "humanPlayerCount",
           "maximumHumanPlayers",
-          "seats"
+          "seats",
+          "eventRevision",
+          "eventSequence"
         ],
         "properties": {
           "roomId": {
@@ -970,6 +972,17 @@
             "items": {
               "$ref": "#/components/schemas/MultiplayerSeat"
             }
+          },
+          "eventRevision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Lobby event cursor captured atomically with this room snapshot. Lobby revisions are process-wide and may skip values due to events in other rooms."
+          },
+          "eventSequence": {
+            "type": "integer",
+            "minimum": -1,
+            "description": "Sequence at eventRevision; lobby events currently use 0 and -1 denotes a snapshot baseline before the next event."
           }
         }
       },

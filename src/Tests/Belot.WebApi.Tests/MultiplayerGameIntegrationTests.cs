@@ -34,7 +34,8 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
     {
         this.factory = new ApiFactory(
             multiplayerConnectionString: Environment.GetEnvironmentVariable("BELOT_TEST_POSTGRES"),
-            realtimeEventsPerGame: 32);
+            realtimeEventsPerGame: 32,
+            realtimeEventsPerLobby: 16);
         this.client = this.factory.CreateClient();
     }
 
@@ -554,11 +555,12 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
             "LobbyEvent",
             lobbyEvent => hostChannel.Writer.TryWrite(lobbyEvent));
         await hostConnection.StartAsync();
-        await hostConnection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+        var hostSubscription = await hostConnection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
             "JoinRoom",
             created.Room.RoomId,
             created.Room.EventRevision,
             created.Room.EventSequence);
+        Assert.False(hostSubscription.SnapshotRequired);
 
         var joiningUserId = Guid.NewGuid().ToString();
         using var joinRequest = ApiFactory.CreateAuthenticatedRequest(
@@ -580,11 +582,12 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
             "LobbyEvent",
             lobbyEvent => joiningChannel.Writer.TryWrite(lobbyEvent));
         await joiningConnection.StartAsync();
-        await joiningConnection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+        var joiningSubscription = await joiningConnection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
             "JoinRoom",
             created.Room.RoomId,
             joinedRoom.EventRevision,
             joinedRoom.EventSequence);
+        Assert.False(joiningSubscription.SnapshotRequired);
 
         await this.SetReadyAsync(created.Room.RoomId, hostId, true);
         var hostReadyEvent = await hostChannel.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
@@ -626,6 +629,255 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
         Assert.DoesNotContain(joiningUserId, publicJson, StringComparison.Ordinal);
         Assert.DoesNotContain("\"hand\"", publicJson, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("\"invitationCode\"", publicJson, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task LobbyReadAndMutationCannotRacePastEachOthersCursors()
+    {
+        var hostId = Guid.NewGuid().ToString();
+        var created = await this.CreateLobbyAsync(hostId, new CreateMultiplayerRoomRequest
+        {
+            MaximumHumanPlayers = 2,
+            EastBot = "random",
+            NorthBot = "random",
+            WestBot = "random",
+        });
+        var joiningUserId = Guid.NewGuid().ToString();
+        await this.JoinLobbyAsync(
+            this.client,
+            created.Room.RoomId,
+            created.InvitationCode,
+            joiningUserId,
+            PlayerPosition.East);
+
+        var readEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var mutationWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var blockNextRead = 1;
+        this.factory.LobbyLockEntered = async roomId =>
+        {
+            if (roomId == created.Room.RoomId && Interlocked.Exchange(ref blockNextRead, 0) == 1)
+            {
+                readEntered.SetResult();
+                await releaseRead.Task;
+            }
+        };
+        this.factory.LobbyLockWaiting = roomId =>
+        {
+            if (roomId == created.Room.RoomId && readEntered.Task.IsCompleted)
+            {
+                mutationWaiting.TrySetResult();
+            }
+        };
+
+        using var readRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Get,
+            $"/api/multiplayer/lobbies/{created.Room.RoomId}",
+            ApiFactory.CreateAccessToken(hostId));
+        var readTask = this.client.SendAsync(readRequest);
+        await readEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        using var readyRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/lobbies/{created.Room.RoomId}/ready",
+            ApiFactory.CreateAccessToken(hostId));
+        readyRequest.Content = JsonContent.Create(new { isReady = true });
+        var readyTask = this.client.SendAsync(readyRequest);
+        try
+        {
+            await mutationWaiting.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.False(readyTask.IsCompleted);
+        }
+        finally
+        {
+            releaseRead.TrySetResult();
+        }
+
+        using var readResponse = await readTask;
+        using var readyResponse = await readyTask;
+        Assert.Equal(HttpStatusCode.OK, readResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, readyResponse.StatusCode);
+        var staleButConsistent = (await readResponse.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+        var acceptedState = (await readyResponse.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+        Assert.False(staleButConsistent.Seats.Single(seat => seat.Seat == PlayerPosition.South).IsReady);
+        Assert.True(acceptedState.Seats.Single(seat => seat.Seat == PlayerPosition.South).IsReady);
+        Assert.True(acceptedState.EventRevision > staleButConsistent.EventRevision);
+        Assert.Equal(0, staleButConsistent.EventSequence);
+        Assert.Equal(0, acceptedState.EventSequence);
+
+        this.factory.LobbyLockEntered = null;
+        this.factory.LobbyLockWaiting = null;
+    }
+
+    [Fact]
+    public async Task ConcurrentReadinessChangesPublishOrderedMatchingSnapshots()
+    {
+        var hostId = Guid.NewGuid().ToString();
+        var created = await this.CreateLobbyAsync(hostId, new CreateMultiplayerRoomRequest
+        {
+            MaximumHumanPlayers = 2,
+            EastBot = "random",
+            NorthBot = "random",
+            WestBot = "random",
+        });
+        var joiningUserId = Guid.NewGuid().ToString();
+        await this.JoinLobbyAsync(
+            this.client,
+            created.Room.RoomId,
+            created.InvitationCode,
+            joiningUserId,
+            PlayerPosition.East);
+        using var joinedLobbyResponse = await this.GetLobbyAsync(created.Room.RoomId, hostId);
+        var joinedLobby = (await joinedLobbyResponse.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+
+        var events = Channel.CreateUnbounded<MultiplayerLobbyEventEnvelope>();
+        await using var connection = this.CreateHubConnection(hostId);
+        connection.On<MultiplayerLobbyEventEnvelope>(
+            "LobbyEvent",
+            lobbyEvent => events.Writer.TryWrite(lobbyEvent));
+        await connection.StartAsync();
+        await connection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+            "JoinRoom",
+            created.Room.RoomId,
+            joinedLobby.EventRevision,
+            joinedLobby.EventSequence);
+
+        var bothRequestsWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waitingRequests = 0;
+        Task<HttpResponseMessage>[] responses = Array.Empty<Task<HttpResponseMessage>>();
+        await this.factory.Services.GetRequiredService<IMultiplayerRealtimePublisher>()
+            .WithLobbyLockAsync(
+                created.Room.RoomId,
+                async () =>
+                {
+                    this.factory.LobbyLockWaiting = roomId =>
+                    {
+                        if (roomId == created.Room.RoomId
+                            && Interlocked.Increment(ref waitingRequests) == 2)
+                        {
+                            bothRequestsWaiting.TrySetResult();
+                        }
+                    };
+                    responses = new[]
+                    {
+                        this.SendReadyResponseAsync(created.Room.RoomId, hostId, true),
+                        this.SendReadyResponseAsync(created.Room.RoomId, joiningUserId, true),
+                    };
+                    await bothRequestsWaiting.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                    return true;
+                },
+                CancellationToken.None);
+        this.factory.LobbyLockWaiting = null;
+        var completedResponses = await Task.WhenAll(responses);
+        try
+        {
+            Assert.All(completedResponses, response => Assert.Equal(HttpStatusCode.OK, response.StatusCode));
+            var snapshots = await Task.WhenAll(completedResponses.Select(response =>
+                response.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions)));
+            var receivedEvents = new[]
+            {
+                await events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)),
+                await events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)),
+            };
+            Assert.True(receivedEvents[0].Revision < receivedEvents[1].Revision);
+            Assert.Equal(
+                receivedEvents.Select(lobbyEvent => lobbyEvent.Revision).Order(),
+                snapshots.Select(snapshot => snapshot!.EventRevision).Order());
+            foreach (var lobbyEvent in receivedEvents)
+            {
+                var matchingSnapshot = snapshots.Single(snapshot => snapshot!.EventRevision == lobbyEvent.Revision)!;
+                Assert.Equal(
+                    lobbyEvent.Seats.Select(seat => (seat.Seat, seat.IsReady)).OrderBy(seat => seat.Seat),
+                    matchingSnapshot.Seats.Select(seat => (seat.Seat.ToString(), seat.IsReady)).OrderBy(seat => seat.Item1));
+            }
+
+            var latestLobby = await this.GetLobbyAsync(created.Room.RoomId, hostId);
+            var latest = (await latestLobby.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+            Assert.Equal(receivedEvents[1].Revision, latest.EventRevision);
+            Assert.All(latest.Seats.Where(seat => seat.IsOccupied), seat => Assert.True(seat.IsReady));
+        }
+        finally
+        {
+            foreach (var response in completedResponses)
+            {
+                response.Dispose();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ReconnectAfterLobbyHistoryEvictionRequiresOneSnapshotThenResumes()
+    {
+        var hostId = Guid.NewGuid().ToString();
+        var created = await this.CreateLobbyAsync(hostId, new CreateMultiplayerRoomRequest
+        {
+            MaximumHumanPlayers = 2,
+            EastBot = "random",
+            NorthBot = "random",
+            WestBot = "random",
+        });
+        var staleCursor = new MultiplayerEventCursor(created.Room.EventRevision, created.Room.EventSequence);
+        for (var eventIndex = 0; eventIndex < 17; eventIndex++)
+        {
+            using var response = await this.SendReadyResponseAsync(
+                created.Room.RoomId,
+                hostId,
+                isReady: eventIndex % 2 == 0);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+
+        var notices = Channel.CreateUnbounded<JsonElement>();
+        await using var connection = this.CreateHubConnection(hostId);
+        connection.On<JsonElement>("SnapshotRequired", notice => notices.Writer.TryWrite(notice));
+        await connection.StartAsync();
+        var staleReplay = await connection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+            "JoinRoom",
+            created.Room.RoomId,
+            staleCursor.Revision,
+            staleCursor.Sequence);
+        Assert.True(staleReplay.SnapshotRequired);
+        var notice = await notices.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("room", notice.GetProperty("resourceType").GetString());
+
+        using var snapshotResponse = await this.GetLobbyAsync(created.Room.RoomId, hostId);
+        Assert.Equal(HttpStatusCode.OK, snapshotResponse.StatusCode);
+        var snapshot = (await snapshotResponse.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+        var recoveredReplay = await connection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+            "JoinRoom",
+            created.Room.RoomId,
+            snapshot.EventRevision,
+            snapshot.EventSequence);
+        Assert.False(recoveredReplay.SnapshotRequired);
+        Assert.Equal(snapshot.EventRevision, recoveredReplay.LatestRevision);
+    }
+
+    [Fact]
+    public async Task OtherLobbiesRevisionGapsDoNotCauseAFalseReplayGap()
+    {
+        var firstHost = Guid.NewGuid().ToString();
+        var firstLobby = await this.CreateLobbyAsync(firstHost, new CreateMultiplayerRoomRequest());
+        var secondHost = Guid.NewGuid().ToString();
+        var secondLobby = await this.CreateLobbyAsync(secondHost, new CreateMultiplayerRoomRequest());
+        var firstCursor = new MultiplayerEventCursor(firstLobby.Room.EventRevision, firstLobby.Room.EventSequence);
+        await this.SetReadyAsync(secondLobby.Room.RoomId, secondHost, true);
+        await this.SetReadyAsync(firstLobby.Room.RoomId, firstHost, true);
+
+        var received = Channel.CreateUnbounded<MultiplayerLobbyEventEnvelope>();
+        await using var connection = this.CreateHubConnection(firstHost);
+        connection.On<MultiplayerLobbyEventEnvelope>(
+            "LobbyEvent",
+            lobbyEvent => received.Writer.TryWrite(lobbyEvent));
+        await connection.StartAsync();
+        var replay = await connection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+            "JoinRoom",
+            firstLobby.Room.RoomId,
+            firstCursor.Revision,
+            firstCursor.Sequence);
+
+        Assert.False(replay.SnapshotRequired);
+        var replayedEvent = await received.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(firstLobby.Room.RoomId, replayedEvent.RoomId);
+        Assert.Equal("player-ready", replayedEvent.Type);
     }
 
     [Fact]
@@ -1008,7 +1260,27 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
         => await this.CreateLobbyAsync(this.client, userId, request);
 
     private async Task SetReadyAsync(string roomId, string userId, bool isReady)
-        => await this.SetReadyAsync(this.client, roomId, userId, isReady);
+    {
+        using var response = await this.SendReadyResponseAsync(roomId, userId, isReady);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    private Task<HttpResponseMessage> SendReadyResponseAsync(string roomId, string userId, bool isReady) =>
+        this.SendReadyResponseAsync(this.client, roomId, userId, isReady);
+
+    private Task<HttpResponseMessage> SendReadyResponseAsync(
+        HttpClient client,
+        string roomId,
+        string userId,
+        bool isReady)
+    {
+        var request = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/lobbies/{roomId}/ready",
+            ApiFactory.CreateAccessToken(userId));
+        request.Content = JsonContent.Create(new { isReady });
+        return client.SendAsync(request);
+    }
 
     private async Task<CreateMultiplayerRoomResponse> CreateLobbyAsync(
         HttpClient client,

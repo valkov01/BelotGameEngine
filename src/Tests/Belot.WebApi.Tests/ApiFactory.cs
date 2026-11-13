@@ -47,6 +47,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     private readonly int? realtimeEventsPerGame;
 
+    private readonly int? realtimeEventsPerLobby;
+
     private readonly bool failRealtimeGameDelivery;
 
     public ApiFactory(
@@ -56,6 +58,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         string? jwtSecret = null,
         string? multiplayerConnectionString = null,
         int? realtimeEventsPerGame = null,
+        int? realtimeEventsPerLobby = null,
         bool failRealtimeGameDelivery = false)
     {
         this.revealHandsEnabled = revealHandsEnabled;
@@ -64,8 +67,13 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         this.jwtSecret = jwtSecret;
         this.multiplayerConnectionString = multiplayerConnectionString;
         this.realtimeEventsPerGame = realtimeEventsPerGame;
+        this.realtimeEventsPerLobby = realtimeEventsPerLobby;
         this.failRealtimeGameDelivery = failRealtimeGameDelivery;
     }
+
+    public Action<string>? LobbyLockWaiting { get; set; }
+
+    public Func<string, Task>? LobbyLockEntered { get; set; }
 
     public static string CreateAccessToken(
         string userId,
@@ -115,6 +123,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 ["Authentication:Supabase:JwtSecret"] = this.jwtSecret,
                 ["Multiplayer:PostgresConnectionString"] = this.multiplayerConnectionString,
                 ["Multiplayer:Realtime:EventsPerGame"] = this.realtimeEventsPerGame?.ToString(),
+                ["Multiplayer:Realtime:EventsPerLobby"] = this.realtimeEventsPerLobby?.ToString(),
             }));
 
         builder.ConfigureTestServices(services =>
@@ -157,22 +166,50 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 };
             });
 
-            if (this.failRealtimeGameDelivery)
-            {
-                services.AddSingleton<IMultiplayerRealtimePublisher>(provider =>
-                    new FailingRealtimePublisher(
-                        provider.GetRequiredService<MultiplayerRealtimePublisher>()));
-            }
+            services.AddSingleton<IMultiplayerRealtimePublisher>(provider =>
+                new TestRealtimePublisher(
+                    this,
+                    provider.GetRequiredService<MultiplayerRealtimePublisher>(),
+                    this.failRealtimeGameDelivery));
         });
     }
 
-    private sealed class FailingRealtimePublisher : IMultiplayerRealtimePublisher
+    private sealed class TestRealtimePublisher : IMultiplayerRealtimePublisher
     {
+        private readonly ApiFactory factory;
+
         private readonly IMultiplayerRealtimePublisher publisher;
 
-        public FailingRealtimePublisher(IMultiplayerRealtimePublisher publisher)
+        private readonly bool failRealtimeGameDelivery;
+
+        public TestRealtimePublisher(
+            ApiFactory factory,
+            IMultiplayerRealtimePublisher publisher,
+            bool failRealtimeGameDelivery)
         {
+            this.factory = factory;
             this.publisher = publisher;
+            this.failRealtimeGameDelivery = failRealtimeGameDelivery;
+        }
+
+        public async Task<T> WithLobbyLockAsync<T>(
+            string roomId,
+            Func<Task<T>> operation,
+            CancellationToken cancellationToken)
+        {
+            this.factory.LobbyLockWaiting?.Invoke(roomId);
+            return await this.publisher.WithLobbyLockAsync(
+                roomId,
+                async () =>
+                {
+                    if (this.factory.LobbyLockEntered is { } entered)
+                    {
+                        await entered(roomId);
+                    }
+
+                    return await operation();
+                },
+                cancellationToken);
         }
 
         public MultiplayerEventCursor GetGameCursor(string gameId, long revision) =>
@@ -186,7 +223,9 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             long revision,
             IReadOnlyList<PublicGameEventDto> events,
             CancellationToken cancellationToken) =>
-            Task.FromException(new IOException("Simulated SignalR delivery failure."));
+            this.failRealtimeGameDelivery
+                ? Task.FromException(new IOException("Simulated SignalR delivery failure."))
+                : this.publisher.PublishGameEventsAsync(gameId, revision, events, cancellationToken);
 
         public Task PublishLobbyChangeAsync(
             MultiplayerRoom room,

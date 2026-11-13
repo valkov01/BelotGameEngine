@@ -41,6 +41,11 @@ public sealed record MultiplayerLobbyEventEnvelope(
 
 public interface IMultiplayerRealtimePublisher
 {
+    Task<T> WithLobbyLockAsync<T>(
+        string roomId,
+        Func<Task<T>> operation,
+        CancellationToken cancellationToken);
+
     MultiplayerEventCursor GetGameCursor(string gameId, long revision);
 
     MultiplayerEventCursor GetLobbyCursor(string roomId);
@@ -81,6 +86,8 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
 
     private const int MaximumTopics = 512;
 
+    private const int LobbyLockStripeCount = 64;
+
     private const string GameEventName = "GameEvent";
 
     private const string LobbyEventName = "LobbyEvent";
@@ -92,6 +99,11 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
     private readonly ILogger<MultiplayerRealtimePublisher> logger;
 
     private readonly SemaphoreSlim publishGate = new(1, 1);
+
+    private readonly SemaphoreSlim[] lobbyLocks = Enumerable
+        .Range(0, LobbyLockStripeCount)
+        .Select(_ => new SemaphoreSlim(1, 1))
+        .ToArray();
 
     private readonly object sync = new();
 
@@ -116,6 +128,25 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
         this.eventsPerLobby = Math.Clamp(configuration.GetValue("Multiplayer:Realtime:EventsPerLobby", DefaultEventsPerLobby), 16, 1024);
     }
 
+    public async Task<T> WithLobbyLockAsync<T>(
+        string roomId,
+        Func<Task<T>> operation,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+
+        var lobbyLock = this.lobbyLocks[(StringComparer.Ordinal.GetHashCode(roomId) & int.MaxValue) % LobbyLockStripeCount];
+        await lobbyLock.WaitAsync(cancellationToken);
+        try
+        {
+            return await operation();
+        }
+        finally
+        {
+            lobbyLock.Release();
+        }
+    }
+
     public MultiplayerEventCursor GetGameCursor(string gameId, long revision)
     {
         lock (this.sync)
@@ -130,9 +161,15 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
     {
         lock (this.sync)
         {
-            return this.lobbyTopics.TryGetValue(roomId, out var topic)
-                ? new MultiplayerEventCursor(topic.Revision, topic.Sequence)
-                : new MultiplayerEventCursor(Interlocked.Read(ref this.lobbyRevision), 0);
+            if (!this.lobbyTopics.TryGetValue(roomId, out var topic))
+            {
+                topic = CreateLobbyTopic(Interlocked.Increment(ref this.lobbyRevision));
+                this.lobbyTopics.Add(roomId, topic);
+                this.TrimTopics();
+            }
+
+            topic.LastAccess = DateTimeOffset.UtcNow;
+            return new MultiplayerEventCursor(topic.Revision, topic.Sequence);
         }
     }
 
@@ -177,18 +214,7 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
         await this.publishGate.WaitAsync(cancellationToken);
         try
         {
-            var revision = Interlocked.Increment(ref this.lobbyRevision);
-            var envelope = new MultiplayerLobbyEventEnvelope(
-                room.RoomId,
-                revision,
-                0,
-                type,
-                seat?.ToString(),
-                room.Status,
-                room.Members.Count,
-                room.MaximumHumanPlayers,
-                room.Seats.Select(ToPublicSeat).ToArray());
-            this.AppendLobbyEvent(envelope);
+            var envelope = this.AppendLobbyEvent(room, type, seat);
             await this.TryBroadcastAsync(LobbyGroup(room.RoomId), LobbyEventName, envelope, cancellationToken);
         }
         finally
@@ -304,16 +330,29 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
         }
     }
 
-    private void AppendLobbyEvent(MultiplayerLobbyEventEnvelope envelope)
+    private MultiplayerLobbyEventEnvelope AppendLobbyEvent(
+        MultiplayerRoom room,
+        string type,
+        PlayerPosition? seat)
     {
         lock (this.sync)
         {
-            if (!this.lobbyTopics.TryGetValue(envelope.RoomId, out var topic))
+            if (!this.lobbyTopics.TryGetValue(room.RoomId, out var topic))
             {
-                topic = new LobbyTopic { Truncated = envelope.Revision > 1 };
-                this.lobbyTopics.Add(envelope.RoomId, topic);
+                topic = CreateLobbyTopic(Interlocked.Increment(ref this.lobbyRevision));
+                this.lobbyTopics.Add(room.RoomId, topic);
             }
 
+            var envelope = new MultiplayerLobbyEventEnvelope(
+                room.RoomId,
+                Interlocked.Increment(ref this.lobbyRevision),
+                0,
+                type,
+                seat?.ToString(),
+                room.Status,
+                room.Members.Count,
+                room.MaximumHumanPlayers,
+                room.Seats.Select(ToPublicSeat).ToArray());
             topic.Events.Add(envelope);
             topic.Revision = envelope.Revision;
             topic.Sequence = envelope.Sequence;
@@ -325,6 +364,7 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
             }
 
             this.TrimTopics();
+            return envelope;
         }
     }
 
@@ -365,8 +405,8 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
             var latestRevision = Interlocked.Read(ref this.lobbyRevision);
             if (!this.lobbyTopics.TryGetValue(roomId, out var topic))
             {
-                var cursor = new MultiplayerEventCursor(latestRevision, 0);
-                var needsSnapshot = afterRevision != latestRevision || afterSequence != cursor.Sequence;
+                var cursor = new MultiplayerEventCursor(latestRevision, -1);
+                var needsSnapshot = afterRevision != cursor.Revision || afterSequence != cursor.Sequence;
                 return (Array.Empty<MultiplayerLobbyEventEnvelope>(), cursor, needsSnapshot);
             }
 
@@ -375,15 +415,12 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
             var events = topic.Events
                 .Where(lobbyEvent => IsAfter(lobbyEvent.Revision, lobbyEvent.Sequence, afterRevision, afterSequence))
                 .ToArray();
-            var snapshotRequired = IsReplayGap(
-                topic.Events.Select(lobbyEvent => new MultiplayerEventCursor(lobbyEvent.Revision, lobbyEvent.Sequence)).ToArray(),
-                topic.Truncated,
-                afterRevision,
-                afterSequence,
-                latest);
+            var snapshotRequired = IsLobbyReplayGap(topic, afterRevision, afterSequence, latest);
             return (events, latest, snapshotRequired);
         }
     }
+
+    private static LobbyTopic CreateLobbyTopic(long revision) => new(revision);
 
     private async Task TryBroadcastAsync<T>(
         string group,
@@ -514,17 +551,50 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
         public bool Truncated { get; set; } = truncated;
     }
 
-    private sealed class LobbyTopic
+    private sealed class LobbyTopic(long revision)
     {
         public List<MultiplayerLobbyEventEnvelope> Events { get; } = new();
 
-        public long Revision { get; set; }
+        public long Revision { get; set; } = revision;
 
-        public int Sequence { get; set; }
+        public int Sequence { get; set; } = -1;
+
+        public long BaselineRevision { get; } = revision;
 
         public DateTimeOffset LastAccess { get; set; } = DateTimeOffset.UtcNow;
 
         public bool Truncated { get; set; }
+    }
+
+    private static bool IsLobbyReplayGap(
+        LobbyTopic topic,
+        long afterRevision,
+        int afterSequence,
+        MultiplayerEventCursor latest)
+    {
+        if (afterRevision > latest.Revision
+            || (afterRevision == latest.Revision && afterSequence > latest.Sequence))
+        {
+            return true;
+        }
+
+        if (afterRevision == latest.Revision && afterSequence == latest.Sequence)
+        {
+            return false;
+        }
+
+        if (topic.Events.Any(lobbyEvent =>
+            lobbyEvent.Revision == afterRevision && lobbyEvent.Sequence == afterSequence))
+        {
+            return false;
+        }
+
+        if (afterRevision == topic.BaselineRevision && afterSequence == -1)
+        {
+            return topic.Truncated;
+        }
+
+        return true;
     }
 }
 
