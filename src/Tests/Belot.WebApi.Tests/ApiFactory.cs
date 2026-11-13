@@ -51,6 +51,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     private readonly bool failRealtimeGameDelivery;
 
+    private readonly string? corsAllowedOrigin;
+
     public ApiFactory(
         bool revealHandsEnabled = false,
         string? debugAccessKey = null,
@@ -59,7 +61,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         string? multiplayerConnectionString = null,
         int? realtimeEventsPerGame = null,
         int? realtimeEventsPerLobby = null,
-        bool failRealtimeGameDelivery = false)
+        bool failRealtimeGameDelivery = false,
+        string? corsAllowedOrigin = null)
     {
         this.revealHandsEnabled = revealHandsEnabled;
         this.debugAccessKey = debugAccessKey;
@@ -69,6 +72,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         this.realtimeEventsPerGame = realtimeEventsPerGame;
         this.realtimeEventsPerLobby = realtimeEventsPerLobby;
         this.failRealtimeGameDelivery = failRealtimeGameDelivery;
+        this.corsAllowedOrigin = corsAllowedOrigin;
     }
 
     public Action<string>? LobbyLockWaiting { get; set; }
@@ -112,8 +116,9 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
-        builder.ConfigureAppConfiguration(
-            (_, configuration) => configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        builder.ConfigureAppConfiguration((_, configuration) =>
+        {
+            var settings = new Dictionary<string, string?>
             {
                 ["RateLimit:PermitLimit"] = "10000",
                 ["Debug:RevealHandsEnabled"] = this.revealHandsEnabled.ToString(),
@@ -124,7 +129,14 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 ["Multiplayer:PostgresConnectionString"] = this.multiplayerConnectionString,
                 ["Multiplayer:Realtime:EventsPerGame"] = this.realtimeEventsPerGame?.ToString(),
                 ["Multiplayer:Realtime:EventsPerLobby"] = this.realtimeEventsPerLobby?.ToString(),
-            }));
+            };
+            if (this.corsAllowedOrigin is not null)
+            {
+                settings["Cors:AllowedOrigins:0"] = this.corsAllowedOrigin;
+            }
+
+            configuration.AddInMemoryCollection(settings);
+        });
 
         builder.ConfigureTestServices(services =>
         {

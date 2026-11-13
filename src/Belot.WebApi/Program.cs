@@ -79,14 +79,20 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddCors(options =>
 {
     var origins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
+    if (origins.Any(origin => string.Equals(origin.Trim(), "*", StringComparison.Ordinal)))
+    {
+        throw new InvalidOperationException("Cors:AllowedOrigins must not contain wildcard origins.");
+    }
+
     options.AddDefaultPolicy(policy =>
     {
         if (origins.Length > 0)
         {
             policy
                 .WithOrigins(origins)
-                .WithMethods("GET", "POST", "OPTIONS")
-                .WithHeaders("Authorization", "Content-Type", "Accept", "X-Belot-Debug-Key");
+                .WithMethods("GET", "POST", "DELETE", "OPTIONS")
+                .WithHeaders("Authorization", "Content-Type", "Accept", "X-Belot-Debug-Key")
+                .AllowCredentials();
         }
     });
 });

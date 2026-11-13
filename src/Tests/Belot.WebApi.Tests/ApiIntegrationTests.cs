@@ -474,7 +474,7 @@ public sealed class ApiIntegrationTests : IDisposable
     {
         using var preflight = new HttpRequestMessage(HttpMethod.Options, "/api/games");
         preflight.Headers.Add("Origin", "https://preview--belote-bridge-battle.lovable.app");
-        preflight.Headers.Add("Access-Control-Request-Method", "POST");
+        preflight.Headers.Add("Access-Control-Request-Method", "DELETE");
         preflight.Headers.Add("Access-Control-Request-Headers", "authorization, content-type, x-belot-debug-key");
 
         using var response = await this.client.SendAsync(preflight);
@@ -485,7 +485,9 @@ public sealed class ApiIntegrationTests : IDisposable
         var allowedMethods = response.Headers.GetValues("Access-Control-Allow-Methods").Single();
         Assert.Contains("GET", allowedMethods, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("POST", allowedMethods, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("DELETE", allowedMethods, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("OPTIONS", allowedMethods, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("true", response.Headers.GetValues("Access-Control-Allow-Credentials").Single());
         var allowedHeaders = response.Headers.GetValues("Access-Control-Allow-Headers").Single();
         Assert.Contains("content-type", allowedHeaders, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("authorization", allowedHeaders, StringComparison.OrdinalIgnoreCase);
@@ -502,6 +504,42 @@ public sealed class ApiIntegrationTests : IDisposable
         deniedRequest.Headers.Add("Origin", "https://untrusted.example");
         using var deniedResponse = await this.client.SendAsync(deniedRequest);
         Assert.False(deniedResponse.Headers.Contains("Access-Control-Allow-Origin"));
+    }
+
+    [Fact]
+    public async Task CorsAllowsConfiguredOriginForSignalRNegotiationPreflightOnly()
+    {
+        const string trustedOrigin = "https://preview--belote-bridge-battle.lovable.app";
+        using var preflight = new HttpRequestMessage(
+            HttpMethod.Options,
+            "/hubs/multiplayer/negotiate?negotiateVersion=1");
+        preflight.Headers.Add("Origin", trustedOrigin);
+        preflight.Headers.Add("Access-Control-Request-Method", "POST");
+        preflight.Headers.Add("Access-Control-Request-Headers", "authorization, content-type");
+
+        using var response = await this.client.SendAsync(preflight);
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(trustedOrigin, response.Headers.GetValues("Access-Control-Allow-Origin").Single());
+        Assert.Equal("true", response.Headers.GetValues("Access-Control-Allow-Credentials").Single());
+
+        using var deniedPreflight = new HttpRequestMessage(
+            HttpMethod.Options,
+            "/hubs/multiplayer/negotiate?negotiateVersion=1");
+        deniedPreflight.Headers.Add("Origin", "https://untrusted.example");
+        deniedPreflight.Headers.Add("Access-Control-Request-Method", "POST");
+        deniedPreflight.Headers.Add("Access-Control-Request-Headers", "authorization, content-type");
+
+        using var deniedResponse = await this.client.SendAsync(deniedPreflight);
+        Assert.False(deniedResponse.Headers.Contains("Access-Control-Allow-Origin"));
+        Assert.False(deniedResponse.Headers.Contains("Access-Control-Allow-Credentials"));
+    }
+
+    [Fact]
+    public void CorsRejectsWildcardAllowedOriginConfiguration()
+    {
+        using var wildcardFactory = new ApiFactory(corsAllowedOrigin: "*");
+        var exception = Assert.ThrowsAny<InvalidOperationException>(() => wildcardFactory.CreateClient());
+        Assert.Contains("Cors:AllowedOrigins", exception.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]

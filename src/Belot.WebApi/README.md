@@ -96,8 +96,9 @@ the environment variable `Cors__AllowedOrigins__0` to that exact origin (scheme 
 port only when applicable; no path or trailing slash). This is the ASP.NET Core environment-variable
 form of `Cors:AllowedOrigins:0`. Additional trusted origins can be configured as
 `Cors__AllowedOrigins__1`, `Cors__AllowedOrigins__2`, and so on. Only configured origins are
-allowed. The CORS policy permits GET, POST and OPTIONS, and the Content-Type and Accept request
-headers; credentials are not enabled.
+allowed; wildcard origins are rejected. The CORS policy permits GET, POST, DELETE and OPTIONS,
+and the Authorization, Content-Type, Accept and X-Belot-Debug-Key request headers. Credentials
+are enabled for these explicitly configured origins, including SignalR negotiation requests.
 
 The public API contract is available at `https://belotgameengine.onrender.com/openapi/v1.json`.
 The global IP-based rate limit defaults to 120 requests per 60 seconds; tune it with
