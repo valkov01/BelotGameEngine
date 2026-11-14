@@ -515,19 +515,27 @@ public sealed class ApiIntegrationTests : IDisposable
             "/hubs/multiplayer/negotiate?negotiateVersion=1");
         preflight.Headers.Add("Origin", trustedOrigin);
         preflight.Headers.Add("Access-Control-Request-Method", "POST");
-        preflight.Headers.Add("Access-Control-Request-Headers", "authorization, content-type");
+        preflight.Headers.Add(
+            "Access-Control-Request-Headers",
+            "authorization, content-type, x-requested-with");
 
         using var response = await this.client.SendAsync(preflight);
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
         Assert.Equal(trustedOrigin, response.Headers.GetValues("Access-Control-Allow-Origin").Single());
         Assert.Equal("true", response.Headers.GetValues("Access-Control-Allow-Credentials").Single());
+        var allowedHeaders = response.Headers.GetValues("Access-Control-Allow-Headers").Single();
+        Assert.Contains("authorization", allowedHeaders, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("content-type", allowedHeaders, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("x-requested-with", allowedHeaders, StringComparison.OrdinalIgnoreCase);
 
         using var deniedPreflight = new HttpRequestMessage(
             HttpMethod.Options,
             "/hubs/multiplayer/negotiate?negotiateVersion=1");
         deniedPreflight.Headers.Add("Origin", "https://untrusted.example");
         deniedPreflight.Headers.Add("Access-Control-Request-Method", "POST");
-        deniedPreflight.Headers.Add("Access-Control-Request-Headers", "authorization, content-type");
+        deniedPreflight.Headers.Add(
+            "Access-Control-Request-Headers",
+            "authorization, content-type, x-requested-with");
 
         using var deniedResponse = await this.client.SendAsync(deniedPreflight);
         Assert.False(deniedResponse.Headers.Contains("Access-Control-Allow-Origin"));

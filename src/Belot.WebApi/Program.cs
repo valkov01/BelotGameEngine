@@ -91,7 +91,7 @@ builder.Services.AddCors(options =>
             policy
                 .WithOrigins(origins)
                 .WithMethods("GET", "POST", "DELETE", "OPTIONS")
-                .WithHeaders("Authorization", "Content-Type", "Accept", "X-Belot-Debug-Key")
+                .AllowAnyHeader()
                 .AllowCredentials();
         }
     });
