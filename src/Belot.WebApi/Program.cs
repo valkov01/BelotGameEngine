@@ -115,6 +115,8 @@ builder.Services.AddRateLimiter(options =>
 builder.Services.AddSingleton<GameStore>();
 builder.Services.AddSingleton<GameService>();
 builder.Services.AddSingleton<DebugHandsAccess>();
+builder.Services.AddHttpClient("SupabaseProfiles", client => client.Timeout = TimeSpan.FromSeconds(3));
+builder.Services.AddSingleton<IProfileDisplayNameProvider, SupabaseProfileDisplayNameProvider>();
 builder.Services.AddSingleton<MultiplayerGameStore>();
 builder.Services.AddSingleton<IMultiplayerGameRevisionProvider>(
     services => services.GetRequiredService<MultiplayerGameStore>());

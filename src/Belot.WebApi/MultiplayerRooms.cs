@@ -58,7 +58,10 @@ public sealed record MultiplayerSeatDto(
     bool IsOccupied,
     bool IsHost,
     bool IsReady,
-    string? BotProfileId);
+    string? BotProfileId)
+{
+    public string? DisplayName { get; init; }
+}
 
 /// <summary>A lobby projection scoped to the authenticated member's own seat.</summary>
 public sealed record MultiplayerRoomDto(
@@ -626,19 +629,26 @@ internal static class MultiplayerRoomMapper
         MultiplayerRoom room,
         string userId,
         bool isGameAvailable = false,
-        MultiplayerEventCursor? eventCursor = null)
+        MultiplayerEventCursor? eventCursor = null,
+        IReadOnlyDictionary<string, string?>? displayNames = null)
     {
         var membership = room.Members.Single(member => string.Equals(member.UserId, userId, StringComparison.Ordinal));
         var seats = room.Seats
             .Select(seat => new MultiplayerSeatDto(
-                seat.Position,
-                seat.Team,
-                seat.OwnerUserId is not null || seat.BotProfileId is not null,
-                seat.IsHost,
-                seat.IsReady,
-                seat.BotProfileId ?? (seat.OwnerUserId is null && room.Status == MultiplayerRoomStatus.WaitingForPlayers
-                    ? room.BotProfiles[seat.Position.ToString()]
-                    : null)))
+                    seat.Position,
+                    seat.Team,
+                    seat.OwnerUserId is not null || seat.BotProfileId is not null,
+                    seat.IsHost,
+                    seat.IsReady,
+                    seat.BotProfileId ?? (seat.OwnerUserId is null && room.Status == MultiplayerRoomStatus.WaitingForPlayers
+                        ? room.BotProfiles[seat.Position.ToString()]
+                        : null))
+                {
+                    DisplayName = seat.OwnerUserId is not null && displayNames is not null
+                    && displayNames.TryGetValue(seat.OwnerUserId, out var displayName)
+                    ? displayName
+                    : null,
+                })
             .ToArray();
         return new MultiplayerRoomDto(
             room.RoomId,

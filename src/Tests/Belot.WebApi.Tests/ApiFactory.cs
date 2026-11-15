@@ -53,6 +53,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     private readonly string? corsAllowedOrigin;
 
+    private readonly IProfileDisplayNameProvider? profileDisplayNameProvider;
+
     public ApiFactory(
         bool revealHandsEnabled = false,
         string? debugAccessKey = null,
@@ -62,7 +64,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         int? realtimeEventsPerGame = null,
         int? realtimeEventsPerLobby = null,
         bool failRealtimeGameDelivery = false,
-        string? corsAllowedOrigin = null)
+        string? corsAllowedOrigin = null,
+        IProfileDisplayNameProvider? profileDisplayNameProvider = null)
     {
         this.revealHandsEnabled = revealHandsEnabled;
         this.debugAccessKey = debugAccessKey;
@@ -73,6 +76,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         this.realtimeEventsPerLobby = realtimeEventsPerLobby;
         this.failRealtimeGameDelivery = failRealtimeGameDelivery;
         this.corsAllowedOrigin = corsAllowedOrigin;
+        this.profileDisplayNameProvider = profileDisplayNameProvider;
     }
 
     public Action<string>? LobbyLockWaiting { get; set; }
@@ -183,6 +187,10 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                     this,
                     provider.GetRequiredService<MultiplayerRealtimePublisher>(),
                     this.failRealtimeGameDelivery));
+            if (this.profileDisplayNameProvider is not null)
+            {
+                services.AddSingleton(this.profileDisplayNameProvider);
+            }
         });
     }
 

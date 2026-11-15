@@ -105,6 +105,33 @@ The global IP-based rate limit defaults to 120 requests per 60 seconds; tune it 
 `RateLimit__PermitLimit` and `RateLimit__WindowSeconds`. `Games__MaximumActive` limits stored
 games (default 500).
 
+### Multiplayer seat display names
+
+Member-only lobby REST responses and `LobbyEvent` seat projections include an optional nullable
+`displayName`. Names are looked up using the room repository's authenticated seat owner IDs, never
+client-submitted IDs. The server selects only `id`, `username`, and `display_name` from Supabase
+`profiles`; a nonempty username wins, followed by a nonempty display name. No email or other
+profile fields are read or returned. Bot and vacant seats, missing profiles, lookup failures, and
+missing configuration produce `displayName: null` so the frontend can retain its role-based
+fallback. Names are trimmed, whitespace is collapsed, control characters removed, and length is
+limited to 40 Unicode characters.
+Lookup results are server-side cached by user ID for at most five minutes and profile failures briefly cached;
+played-card events do not trigger profile requests.
+
+The API source does not include the Lovable profile schema or its RLS policies. This integration
+assumes the existing `profiles` table has `id`, `username`, and `display_name` columns. It uses a
+server-only Supabase service-role credential so lookup is independent of normal-user profile SELECT
+policies; it does not change or loosen global RLS. Configure these environment variables on the
+**Render staging API service**:
+
+- `Supabase__Url` — the Supabase project URL, for example `https://<project-ref>.supabase.co`.
+- `Supabase__ServiceRoleKey` — that project's service-role secret, stored only in Render's
+  protected environment settings.
+
+Both settings are required to enable lookup. Never place the service-role key in the Lovable/browser
+environment, API responses, SignalR payloads, or source control. If either setting is absent or
+lookup fails, multiplayer rooms and gameplay continue with null display names.
+
 ### Developer-only hand inspection
 
 The debug route is unavailable unless both settings are configured. For temporary bot testing in

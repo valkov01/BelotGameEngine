@@ -50,6 +50,7 @@
             [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] CreateMultiplayerRoomRequest? request,
             ClaimsPrincipal caller,
             IRoomMembershipService rooms,
+            IProfileDisplayNameProvider profileDisplayNames,
             IMultiplayerRealtimePublisher realtime,
             CancellationToken cancellationToken)
         {
@@ -58,7 +59,7 @@
                 ? Results.Created(
                     $"/api/multiplayer/lobbies/{result.Room!.RoomId}",
                     new CreateMultiplayerRoomResponse(
-                        ToRoomDto(result.Room, caller, realtime),
+                        await ToRoomDtoAsync(result.Room, caller, profileDisplayNames, realtime, cancellationToken),
                         result.InvitationCode!))
                 : ToProblem(result);
         }
@@ -68,6 +69,7 @@
             ClaimsPrincipal caller,
             IRoomMembershipService rooms,
             IMultiplayerGameService games,
+            IProfileDisplayNameProvider profileDisplayNames,
             IMultiplayerRealtimePublisher realtime,
             CancellationToken cancellationToken) =>
             await realtime.WithLobbyLockAsync(
@@ -76,10 +78,12 @@
                 {
                     var result = await rooms.GetRoomAsync(caller, roomId, cancellationToken);
                     return result.Status == MultiplayerRoomServiceStatus.Success
-                        ? Results.Ok(ToRoomDto(
+                        ? Results.Ok(await ToRoomDtoAsync(
                             result.Room!,
                             caller,
+                            profileDisplayNames,
                             realtime,
+                            cancellationToken,
                             result.Room!.Status == MultiplayerRoomStatus.Started && games.IsGameAvailable(roomId)))
                         : ToProblem(result);
                 },
@@ -90,6 +94,7 @@
             JoinMultiplayerRoomRequest? request,
             ClaimsPrincipal caller,
             ISeatAssignmentService assignments,
+            IProfileDisplayNameProvider profileDisplayNames,
             IMultiplayerRealtimePublisher realtime,
             CancellationToken cancellationToken) =>
             await realtime.WithLobbyLockAsync(
@@ -110,7 +115,7 @@
                         "player-joined",
                         seat,
                         CancellationToken.None);
-                    return Results.Ok(ToRoomDto(room, caller, realtime));
+                    return Results.Ok(await ToRoomDtoAsync(room, caller, profileDisplayNames, realtime, cancellationToken));
                 },
                 cancellationToken);
 
@@ -119,6 +124,7 @@
             SetMultiplayerReadyRequest? request,
             ClaimsPrincipal caller,
             ISeatAssignmentService assignments,
+            IProfileDisplayNameProvider profileDisplayNames,
             IMultiplayerRealtimePublisher realtime,
             CancellationToken cancellationToken) =>
             await realtime.WithLobbyLockAsync(
@@ -144,7 +150,7 @@
                         request.IsReady ? "player-ready" : "player-not-ready",
                         seat,
                         CancellationToken.None);
-                    return Results.Ok(ToRoomDto(room, caller, realtime));
+                    return Results.Ok(await ToRoomDtoAsync(room, caller, profileDisplayNames, realtime, cancellationToken));
                 },
                 cancellationToken);
 
@@ -152,6 +158,7 @@
             string roomId,
             ClaimsPrincipal caller,
             IMultiplayerGameService games,
+            IProfileDisplayNameProvider profileDisplayNames,
             IMultiplayerRealtimePublisher realtime,
             CancellationToken cancellationToken) =>
             await realtime.WithLobbyLockAsync(
@@ -169,7 +176,13 @@
                         "game-started",
                         null,
                         CancellationToken.None);
-                    return Results.Ok(ToRoomDto(result.Room!, caller, realtime, isGameAvailable: true));
+                    return Results.Ok(await ToRoomDtoAsync(
+                        result.Room!,
+                        caller,
+                        profileDisplayNames,
+                        realtime,
+                        cancellationToken,
+                        isGameAvailable: true));
                 },
                 cancellationToken);
 
@@ -210,16 +223,23 @@
                 : ToAutomationProblem(result);
         }
 
-        private static MultiplayerRoomDto ToRoomDto(
+        private static async Task<MultiplayerRoomDto> ToRoomDtoAsync(
             MultiplayerRoom room,
             ClaimsPrincipal caller,
+            IProfileDisplayNameProvider profileDisplayNames,
             IMultiplayerRealtimePublisher realtime,
+            CancellationToken cancellationToken,
             bool isGameAvailable = false) =>
             MultiplayerRoomMapper.ToDto(
                 room,
                 caller.FindFirst("sub")!.Value,
                 isGameAvailable,
-                realtime.GetLobbyCursor(room.RoomId));
+                realtime.GetLobbyCursor(room.RoomId),
+                await profileDisplayNames.ResolveAsync(
+                    room.Seats.Where(seat => seat.OwnerUserId is not null)
+                        .Select(seat => seat.OwnerUserId!)
+                        .ToArray(),
+                    cancellationToken));
 
         private static IResult ToProblem(MultiplayerRoomServiceResult result) => result.Status switch
         {

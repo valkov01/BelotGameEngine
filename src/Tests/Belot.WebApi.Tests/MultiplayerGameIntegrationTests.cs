@@ -30,12 +30,15 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
 
     private readonly HttpClient client;
 
+    private readonly TestProfileDisplayNameProvider profileDisplayNames = new();
+
     public MultiplayerGameIntegrationTests()
     {
         this.factory = new ApiFactory(
             multiplayerConnectionString: Environment.GetEnvironmentVariable("BELOT_TEST_POSTGRES"),
             realtimeEventsPerGame: 32,
-            realtimeEventsPerLobby: 16);
+            realtimeEventsPerLobby: 16,
+            profileDisplayNameProvider: this.profileDisplayNames);
         this.client = this.factory.CreateClient();
     }
 
@@ -68,6 +71,13 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
         Assert.Equal("#/components/schemas/MultiplayerAutomationResponse", resume
             .GetProperty("responses").GetProperty("200").GetProperty("content")
             .GetProperty("application/json").GetProperty("schema").GetProperty("$ref").GetString());
+        var seat = document.RootElement.GetProperty("components").GetProperty("schemas").GetProperty("MultiplayerSeat");
+        var displayName = seat.GetProperty("properties").GetProperty("displayName");
+        Assert.True(displayName.GetProperty("nullable").GetBoolean());
+        Assert.Equal(40, displayName.GetProperty("maxLength").GetInt32());
+        Assert.DoesNotContain(
+            seat.GetProperty("required").EnumerateArray().Select(property => property.GetString()),
+            property => property == "displayName");
     }
 
     [Fact]
@@ -156,6 +166,109 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
         }
 
         Assert.Equal(privateHands.Count, privateHands.Distinct().Count());
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public async Task MemberLobbyMapsDisplayNamesToAbsoluteHumanSeatsAndHidesPrivateIdentity(int humanCount)
+    {
+        var joiningSeats = new[] { PlayerPosition.East, PlayerPosition.North, PlayerPosition.West }
+            .Take(humanCount - 1)
+            .ToArray();
+        var room = await this.CreateStartedRoomAsync(joiningSeats);
+
+        using var response = await this.GetLobbyAsync(room.Room.RoomId, room.Members[PlayerPosition.South]);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var lobby = (await response.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+        foreach (var seat in lobby.Seats)
+        {
+            if (room.Members.ContainsKey(seat.Seat))
+            {
+                Assert.Equal($"Member {seat.Seat}", seat.DisplayName);
+            }
+            else
+            {
+                Assert.Null(seat.DisplayName);
+                Assert.NotNull(seat.BotProfileId);
+            }
+        }
+
+        var json = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("ownerUserId", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("email", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("invitationCode", json, StringComparison.OrdinalIgnoreCase);
+        Assert.All(room.Members.Values, userId => Assert.DoesNotContain(userId, json, StringComparison.Ordinal));
+
+        using var outsider = await this.GetLobbyAsync(room.Room.RoomId, Guid.NewGuid().ToString());
+        Assert.Equal(HttpStatusCode.Forbidden, outsider.StatusCode);
+        var outsiderJson = await outsider.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("displayName", outsiderJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Member ", outsiderJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SeatOwnershipAndDisplayNameIgnoreClientSubmittedIdentity()
+    {
+        var hostId = Guid.NewGuid().ToString();
+        var joiningId = Guid.NewGuid().ToString();
+        var spoofedId = Guid.NewGuid().ToString();
+        this.profileDisplayNames.SetDisplayName(hostId, "Member South");
+        this.profileDisplayNames.SetDisplayName(joiningId, "Authenticated Member");
+        this.profileDisplayNames.SetDisplayName(spoofedId, "Spoofed Member");
+        var creation = await this.CreateLobbyAsync(
+            hostId,
+            new CreateMultiplayerRoomRequest { MaximumHumanPlayers = 2 });
+
+        using var joinRequest = ApiFactory.CreateAuthenticatedRequest(
+            HttpMethod.Post,
+            $"/api/multiplayer/lobbies/{creation.Room.RoomId}/join",
+            ApiFactory.CreateAccessToken(joiningId));
+        joinRequest.Content = JsonContent.Create(new
+        {
+            seat = PlayerPosition.East,
+            invitationCode = creation.InvitationCode,
+            userId = spoofedId,
+            displayName = "Client supplied name",
+        });
+        using var joinResponse = await this.client.SendAsync(joinRequest);
+        Assert.Equal(HttpStatusCode.OK, joinResponse.StatusCode);
+
+        using var lobbyResponse = await this.GetLobbyAsync(creation.Room.RoomId, hostId);
+        Assert.Equal(HttpStatusCode.OK, lobbyResponse.StatusCode);
+        var lobby = (await lobbyResponse.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+        Assert.Equal(
+            "Authenticated Member",
+            lobby.Seats.Single(seat => seat.Seat == PlayerPosition.East).DisplayName);
+        var json = await lobbyResponse.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(spoofedId, json, StringComparison.Ordinal);
+        Assert.DoesNotContain("Spoofed Member", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("Client supplied name", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MissingProfilesAndUnavailableProfileServiceFallBackWithoutBlockingGameplay()
+    {
+        var room = await this.CreateStartedRoomAsync(PlayerPosition.North);
+        var southUserId = room.Members[PlayerPosition.South];
+        this.profileDisplayNames.SetDisplayName(southUserId, null);
+
+        using var missingProfileResponse = await this.GetLobbyAsync(room.Room.RoomId, southUserId);
+        Assert.Equal(HttpStatusCode.OK, missingProfileResponse.StatusCode);
+        var lobby = (await missingProfileResponse.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+        Assert.Null(lobby.Seats.Single(seat => seat.Seat == PlayerPosition.South).DisplayName);
+        Assert.Equal("Member North", lobby.Seats.Single(seat => seat.Seat == PlayerPosition.North).DisplayName);
+
+        this.profileDisplayNames.IsAvailable = false;
+        using var unavailableProfileResponse = await this.GetLobbyAsync(room.Room.RoomId, southUserId);
+        Assert.Equal(HttpStatusCode.OK, unavailableProfileResponse.StatusCode);
+        var unavailableLobby = (await unavailableProfileResponse.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+        Assert.All(unavailableLobby.Seats, seat => Assert.Null(seat.DisplayName));
+
+        var snapshot = await this.GetSnapshotAsync(room.Room.RoomId, southUserId);
+        Assert.Equal(PlayerPosition.South, snapshot.YourSeat);
+        Assert.Equal(5, snapshot.State.Hand.Count);
     }
 
     [Fact]
@@ -408,6 +521,57 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
 
         await using var unauthenticated = this.CreateHubConnection(null);
         await Assert.ThrowsAnyAsync<Exception>(() => unauthenticated.StartAsync());
+    }
+
+    [Fact]
+    public async Task LobbySignalREventsKeepTheSameAbsoluteSeatNamesAsRestSnapshots()
+    {
+        var hostId = Guid.NewGuid().ToString();
+        var joiningId = Guid.NewGuid().ToString();
+        this.profileDisplayNames.SetDisplayName(hostId, "Member South");
+        this.profileDisplayNames.SetDisplayName(joiningId, "Member East");
+        var creation = await this.CreateLobbyAsync(
+            hostId,
+            new CreateMultiplayerRoomRequest { MaximumHumanPlayers = 2 });
+        await this.JoinLobbyAsync(
+            this.client,
+            creation.Room.RoomId,
+            creation.InvitationCode,
+            joiningId,
+            PlayerPosition.East);
+        using var lobbyResponse = await this.GetLobbyAsync(creation.Room.RoomId, hostId);
+        Assert.Equal(HttpStatusCode.OK, lobbyResponse.StatusCode);
+        var before = (await lobbyResponse.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+        var channel = Channel.CreateUnbounded<MultiplayerLobbyEventEnvelope>();
+        await using var connection = this.CreateHubConnection(hostId);
+        connection.On<MultiplayerLobbyEventEnvelope>(
+            "LobbyEvent",
+            lobbyEvent => channel.Writer.TryWrite(lobbyEvent));
+        await connection.StartAsync();
+        var subscription = await connection.InvokeAsync<MultiplayerRealtimeSubscriptionResult>(
+            "JoinRoom",
+            creation.Room.RoomId,
+            before.EventRevision,
+            before.EventSequence);
+        Assert.False(subscription.SnapshotRequired);
+
+        using var ready = await this.SendReadyResponseAsync(creation.Room.RoomId, hostId, isReady: true);
+        Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+        var lobbyEvent = await channel.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        using var afterResponse = await this.GetLobbyAsync(creation.Room.RoomId, hostId);
+        Assert.Equal(HttpStatusCode.OK, afterResponse.StatusCode);
+        var after = (await afterResponse.Content.ReadFromJsonAsync<MultiplayerRoomDto>(ApiJsonOptions))!;
+        Assert.Equal(
+            after.Seats.Select(seat => (seat.Seat, seat.DisplayName)),
+            lobbyEvent.Seats.Select(seat => (Enum.Parse<PlayerPosition>(seat.Seat), seat.DisplayName)));
+
+        var eventJson = JsonSerializer.Serialize(lobbyEvent, ApiJsonOptions);
+        Assert.DoesNotContain("ownerUserId", eventJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("email", eventJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(creation.InvitationCode, eventJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(hostId, eventJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(joiningId, eventJson, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -1209,6 +1373,7 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
     private async Task<StartedRoom> CreateStartedRoomAsync(params PlayerPosition[] joiningSeats)
     {
         var hostId = Guid.NewGuid().ToString();
+        this.profileDisplayNames.SetDisplayName(hostId, $"Member {PlayerPosition.South}");
         var members = new Dictionary<PlayerPosition, string> { [PlayerPosition.South] = hostId };
         var creation = await this.CreateLobbyAsync(hostId, new CreateMultiplayerRoomRequest
         {
@@ -1221,6 +1386,7 @@ public sealed class MultiplayerGameIntegrationTests : IDisposable
         foreach (var seat in joiningSeats)
         {
             var userId = Guid.NewGuid().ToString();
+            this.profileDisplayNames.SetDisplayName(userId, $"Member {seat}");
             members.Add(seat, userId);
             using var joinRequest = ApiFactory.CreateAuthenticatedRequest(
                 HttpMethod.Post,

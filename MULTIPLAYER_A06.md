@@ -119,7 +119,8 @@ connection.on("SnapshotRequired", notice => { /* fetch REST state and resubscrib
       "isOccupied": true,
       "isHost": true,
       "isReady": true,
-      "botProfileId": null
+      "botProfileId": null,
+      "displayName": "player-name"
     }
   ]
 }
@@ -143,6 +144,15 @@ re-establishes a cursor baseline, and subscribing with that returned cursor
 does not cause a repeated snapshot-required loop. Numeric gaps caused by
 changes in other rooms do not cause false gap notices. Use `SnapshotRequired`
 and the room REST snapshot for recovery.
+
+Each REST room seat and lobby-event seat also has an optional nullable
+`displayName`. It identifies the authenticated human owner of that absolute
+engine seat; bot and vacant seats have null names. The API resolves only
+`profiles.username` and `profiles.display_name` by repository-owned owner ID,
+preferring a nonempty username. It does not expose user IDs or email addresses.
+Missing profiles or unavailable profile lookup produce null, preserving the
+frontend's role-based fallback. Profile display text should be rendered as
+text, not interpreted as markup.
 
 `GameEvent` carries one public action:
 

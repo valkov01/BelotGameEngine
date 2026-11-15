@@ -26,7 +26,10 @@ public sealed record MultiplayerLobbySeatEvent(
     bool IsOccupied,
     bool IsHost,
     bool IsReady,
-    string? BotProfileId);
+    string? BotProfileId)
+{
+    public string? DisplayName { get; init; }
+}
 
 public sealed record MultiplayerLobbyEventEnvelope(
     string RoomId,
@@ -98,6 +101,8 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
 
     private readonly ILogger<MultiplayerRealtimePublisher> logger;
 
+    private readonly IProfileDisplayNameProvider profileDisplayNames;
+
     private readonly SemaphoreSlim publishGate = new(1, 1);
 
     private readonly SemaphoreSlim[] lobbyLocks = Enumerable
@@ -120,10 +125,12 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
     public MultiplayerRealtimePublisher(
         IHubContext<MultiplayerRealtimeHub> hub,
         IConfiguration configuration,
+        IProfileDisplayNameProvider profileDisplayNames,
         ILogger<MultiplayerRealtimePublisher> logger)
     {
         this.hub = hub;
         this.logger = logger;
+        this.profileDisplayNames = profileDisplayNames;
         this.eventsPerGame = Math.Clamp(configuration.GetValue("Multiplayer:Realtime:EventsPerGame", DefaultEventsPerGame), 32, 4096);
         this.eventsPerLobby = Math.Clamp(configuration.GetValue("Multiplayer:Realtime:EventsPerLobby", DefaultEventsPerLobby), 16, 1024);
     }
@@ -214,7 +221,12 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
         await this.publishGate.WaitAsync(cancellationToken);
         try
         {
-            var envelope = this.AppendLobbyEvent(room, type, seat);
+            var displayNames = await this.profileDisplayNames.ResolveAsync(
+                room.Seats.Where(roomSeat => roomSeat.OwnerUserId is not null)
+                    .Select(roomSeat => roomSeat.OwnerUserId!)
+                    .ToArray(),
+                cancellationToken);
+            var envelope = this.AppendLobbyEvent(room, type, seat, displayNames);
             await this.TryBroadcastAsync(LobbyGroup(room.RoomId), LobbyEventName, envelope, cancellationToken);
         }
         finally
@@ -333,7 +345,8 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
     private MultiplayerLobbyEventEnvelope AppendLobbyEvent(
         MultiplayerRoom room,
         string type,
-        PlayerPosition? seat)
+        PlayerPosition? seat,
+        IReadOnlyDictionary<string, string?> displayNames)
     {
         lock (this.sync)
         {
@@ -352,7 +365,7 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
                 room.Status,
                 room.Members.Count,
                 room.MaximumHumanPlayers,
-                room.Seats.Select(ToPublicSeat).ToArray());
+                room.Seats.Select(roomSeat => ToPublicSeat(roomSeat, displayNames)).ToArray());
             topic.Events.Add(envelope);
             topic.Revision = envelope.Revision;
             topic.Sequence = envelope.Sequence;
@@ -529,14 +542,21 @@ internal sealed class MultiplayerRealtimePublisher : IMultiplayerRealtimePublish
     private static bool IsAfter(long revision, int sequence, long afterRevision, int afterSequence) =>
         revision > afterRevision || (revision == afterRevision && sequence > afterSequence);
 
-    private static MultiplayerLobbySeatEvent ToPublicSeat(MultiplayerSeat seat) =>
-        new(
+    private static MultiplayerLobbySeatEvent ToPublicSeat(
+        MultiplayerSeat seat,
+        IReadOnlyDictionary<string, string?> displayNames) =>
+        new MultiplayerLobbySeatEvent(
             seat.Position.ToString(),
             seat.Team.ToString(),
             seat.OwnerUserId is not null || seat.BotProfileId is not null,
             seat.IsHost,
             seat.IsReady,
-            seat.BotProfileId);
+            seat.BotProfileId)
+        {
+            DisplayName = seat.OwnerUserId is not null && displayNames.TryGetValue(seat.OwnerUserId, out var displayName)
+                ? displayName
+                : null,
+        };
 
     private sealed class GameTopic(long revision, int sequence, bool truncated)
     {
