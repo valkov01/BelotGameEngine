@@ -1040,7 +1040,7 @@
             "type": "string",
             "maxLength": 40,
             "nullable": true,
-            "description": "Optional profile username or display name for the authenticated human owner of this absolute seat. Null for bots, vacant seats, missing profiles, or unavailable profile lookup."
+            "description": "Optional public profile display_name for the authenticated human owner of this absolute seat. The login username is never used. Null for bots, vacant seats, blank display names, missing profiles, or unavailable profile lookup."
           }
         }
       },

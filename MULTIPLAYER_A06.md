@@ -148,8 +148,9 @@ and the room REST snapshot for recovery.
 Each REST room seat and lobby-event seat also has an optional nullable
 `displayName`. It identifies the authenticated human owner of that absolute
 engine seat; bot and vacant seats have null names. The API resolves only
-`profiles.username` and `profiles.display_name` by repository-owned owner ID,
-preferring a nonempty username. It does not expose user IDs or email addresses.
+`profiles.display_name` by repository-owned owner ID. The login `username` is
+never read or used, including when `display_name` is null or blank. It does not
+expose user IDs or email addresses.
 Missing profiles or unavailable profile lookup produce null, preserving the
 frontend's role-based fallback. Profile display text should be rendered as
 text, not interpreted as markup.

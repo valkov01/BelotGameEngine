@@ -149,7 +149,7 @@ internal sealed class SupabaseProfileDisplayNameProvider : IProfileDisplayNamePr
         {
             var requestUri = new Uri(
                 this.projectUri!,
-                $"/rest/v1/profiles?id=eq.{Uri.EscapeDataString(userId)}&select=id,username,display_name");
+                $"/rest/v1/profiles?id=eq.{Uri.EscapeDataString(userId)}&select=id,display_name");
             using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
             request.Headers.TryAddWithoutValidation("apikey", this.serviceRoleKey);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", this.serviceRoleKey);
@@ -194,8 +194,7 @@ internal sealed class SupabaseProfileDisplayNameProvider : IProfileDisplayNamePr
                 return new LookupResult(null, FailureCacheDuration);
             }
 
-            var displayName = Normalize(ReadString(profile, "username"))
-                ?? Normalize(ReadString(profile, "display_name"));
+            var displayName = Normalize(ReadString(profile, "display_name"));
             return new LookupResult(displayName, displayName is null ? MissingProfileCacheDuration : ProfileCacheDuration);
         }
         catch (HttpRequestException)

@@ -109,9 +109,10 @@ games (default 500).
 
 Member-only lobby REST responses and `LobbyEvent` seat projections include an optional nullable
 `displayName`. Names are looked up using the room repository's authenticated seat owner IDs, never
-client-submitted IDs. The server selects only `id`, `username`, and `display_name` from Supabase
-`profiles`; a nonempty username wins, followed by a nonempty display name. No email or other
-profile fields are read or returned. Bot and vacant seats, missing profiles, lookup failures, and
+client-submitted IDs. The server selects only `id` and `display_name` from Supabase `profiles`.
+`display_name` is the public in-game identity; the login `username` is never read or used, even
+when `display_name` is null, empty, or whitespace. No email or other profile fields are read or
+returned. Bot and vacant seats, missing profiles, lookup failures, and
 missing configuration produce `displayName: null` so the frontend can retain its role-based
 fallback. Names are trimmed, whitespace is collapsed, control characters removed, and length is
 limited to 40 Unicode characters.
@@ -119,7 +120,7 @@ Lookup results are server-side cached by user ID for at most five minutes and pr
 played-card events do not trigger profile requests.
 
 The API source does not include the Lovable profile schema or its RLS policies. This integration
-assumes the existing `profiles` table has `id`, `username`, and `display_name` columns. It uses a
+assumes the existing `profiles` table has `id` and `display_name` columns. It uses a
 server-only Supabase service-role credential so lookup is independent of normal-user profile SELECT
 policies; it does not change or loosen global RLS. Configure these environment variables on the
 **Render staging API service**:
