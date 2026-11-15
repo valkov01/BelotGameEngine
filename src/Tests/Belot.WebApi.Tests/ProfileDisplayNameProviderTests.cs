@@ -75,18 +75,29 @@ public sealed class ProfileDisplayNameProviderTests
         bool includeDisplayName)
     {
         const string userId = "authenticated-user";
+        var profileJson = includeDisplayName
+            ? JsonSerializer.Serialize(new[]
+            {
+                new
+                {
+                    id = userId,
+                    username = "login-username",
+                    display_name = displayName,
+                },
+            })
+            : JsonSerializer.Serialize(new[]
+            {
+                new
+                {
+                    id = userId,
+                    username = "login-username",
+                },
+            });
         using var client = new HttpClient(new StubHttpMessageHandler((_, _) =>
             Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(
-                    includeDisplayName
-                        ? JsonSerializer.Serialize(new
-                        {
-                            id = userId,
-                            username = "login-username",
-                            display_name = displayName,
-                        })
-                        : JsonSerializer.Serialize(new { id = userId, username = "login-username" }),
+                    profileJson,
                     Encoding.UTF8,
                     "application/json"),
             })));
