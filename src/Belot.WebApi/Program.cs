@@ -115,8 +115,16 @@ builder.Services.AddRateLimiter(options =>
 builder.Services.AddSingleton<GameStore>();
 builder.Services.AddSingleton<GameService>();
 builder.Services.AddSingleton<DebugHandsAccess>();
-builder.Services.AddHttpClient("SupabaseProfiles", client => client.Timeout = TimeSpan.FromSeconds(3));
-builder.Services.AddSingleton<IProfileDisplayNameProvider, SupabaseProfileDisplayNameProvider>();
+builder.Services
+    .AddHttpClient(
+        "MultiplayerProfileLookup",
+        client => client.Timeout = Timeout.InfiniteTimeSpan)
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false });
+builder.Services.AddSingleton<IProfileDisplayNameProvider>(services =>
+    new LovableProfileDisplayNameProvider(
+        services.GetRequiredService<IHttpClientFactory>().CreateClient("MultiplayerProfileLookup"),
+        services.GetRequiredService<IConfiguration>(),
+        services.GetRequiredService<ILogger<LovableProfileDisplayNameProvider>>()));
 builder.Services.AddSingleton<MultiplayerGameStore>();
 builder.Services.AddSingleton<IMultiplayerGameRevisionProvider>(
     services => services.GetRequiredService<MultiplayerGameStore>());

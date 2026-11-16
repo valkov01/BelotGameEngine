@@ -109,29 +109,28 @@ games (default 500).
 
 Member-only lobby REST responses and `LobbyEvent` seat projections include an optional nullable
 `displayName`. Names are looked up using the room repository's authenticated seat owner IDs, never
-client-submitted IDs. The server selects only `id` and `display_name` from Supabase `profiles`.
-`display_name` is the public in-game identity; the login `username` is never read or used, even
-when `display_name` is null, empty, or whitespace. No email or other profile fields are read or
-returned. Bot and vacant seats, missing profiles, lookup failures, and
-missing configuration produce `displayName: null` so the frontend can retain its role-based
-fallback. Names are trimmed, whitespace is collapsed, control characters removed, and length is
-limited to 40 Unicode characters.
-Lookup results are server-side cached by user ID for at most five minutes and profile failures briefly cached;
-played-card events do not trigger profile requests.
+client-submitted IDs. The Render API calls Lovable Cloud's server-to-server profile lookup endpoint
+with at most four UUIDs per request. It receives only each matching ID and public `displayName`;
+login usernames, emails, and other profile fields are never read or returned to the C# backend.
+Bot and vacant seats, missing profiles, lookup failures, and missing configuration produce
+`displayName: null` so the frontend can retain its role-based fallback. Names are trimmed,
+whitespace is collapsed, control characters removed, and length is limited to 40 Unicode
+characters. Lookup results are server-side cached by user ID for at most five minutes and failures
+briefly cached; played-card events do not trigger profile requests.
 
-The API source does not include the Lovable profile schema or its RLS policies. This integration
-assumes the existing `profiles` table has `id` and `display_name` columns. It uses a
-server-only Supabase service-role credential so lookup is independent of normal-user profile SELECT
-policies; it does not change or loosen global RLS. Configure these environment variables on the
-**Render staging API service**:
+Configure these variables on the **Render staging API service**:
 
-- `Supabase__Url` — the Supabase project URL, for example `https://<project-ref>.supabase.co`.
-- `Supabase__ServiceRoleKey` — that project's service-role secret, stored only in Render's
-  protected environment settings.
+- `Multiplayer__ProfileLookup__Url` — full HTTPS lookup URL. The current staging preview is
+  `https://project--ad084d7c-ff0d-4db3-aa3d-63b4a7bc4884-dev.lovable.app/api/public/multiplayer-profile-lookup`.
+- `MULTIPLAYER_PROFILE_LOOKUP_SECRET` — the same strong shared secret configured in Lovable Cloud,
+  stored only in Render's protected environment settings.
 
-Both settings are required to enable lookup. Never place the service-role key in the Lovable/browser
-environment, API responses, SignalR payloads, or source control. If either setting is absent or
-lookup fails, multiplayer rooms and gameplay continue with null display names.
+Both settings are optional at startup; if either is missing or lookup fails, multiplayer continues
+with null display names. Never put the shared secret in logs, response bodies, browser/frontend
+configuration, source control, or documentation examples. The `-dev.lovable.app` preview endpoint
+may change or become unavailable; configure a stable published Lovable endpoint before production.
+The Render API does not connect directly to the Lovable Cloud profiles database and does not
+require `Supabase__ServiceRoleKey`.
 
 ### Developer-only hand inspection
 

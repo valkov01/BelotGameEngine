@@ -147,13 +147,23 @@ and the room REST snapshot for recovery.
 
 Each REST room seat and lobby-event seat also has an optional nullable
 `displayName`. It identifies the authenticated human owner of that absolute
-engine seat; bot and vacant seats have null names. The API resolves only
-`profiles.display_name` by repository-owned owner ID. The login `username` is
-never read or used, including when `display_name` is null or blank. It does not
-expose user IDs or email addresses.
+engine seat; bot and vacant seats have null names. The API sends only
+repository-owned authenticated member UUIDs to Lovable Cloud's server-side
+profile lookup endpoint. That endpoint returns only the matching ID and public
+`displayName`; login usernames and email addresses are never read or exposed.
 Missing profiles or unavailable profile lookup produce null, preserving the
 frontend's role-based fallback. Profile display text should be rendered as
 text, not interpreted as markup.
+
+On the Render staging API service, configure
+`Multiplayer__ProfileLookup__Url` as the full HTTPS URL and
+`MULTIPLAYER_PROFILE_LOOKUP_SECRET` as the protected shared secret also held by
+Lovable Cloud. The current preview URL is
+`https://project--ad084d7c-ff0d-4db3-aa3d-63b4a7bc4884-dev.lovable.app/api/public/multiplayer-profile-lookup`.
+Both settings are optional for startup; without them, seats retain null names.
+The preview endpoint may change or become unavailable, so production must use
+a stable published endpoint. Never expose the shared secret to a client, event,
+response, log, or source-controlled documentation.
 
 `GameEvent` carries one public action:
 

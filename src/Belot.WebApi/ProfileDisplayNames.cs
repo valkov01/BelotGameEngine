@@ -1,7 +1,7 @@
 ﻿namespace Belot.WebApi;
 
-using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 
@@ -15,11 +15,13 @@ public interface IProfileDisplayNameProvider
         CancellationToken cancellationToken);
 }
 
-internal sealed class SupabaseProfileDisplayNameProvider : IProfileDisplayNameProvider
+internal sealed class LovableProfileDisplayNameProvider : IProfileDisplayNameProvider
 {
     private const int MaximumCachedProfiles = 4096;
 
     private const int MaximumDisplayNameLength = 40;
+
+    private const int MaximumResponseBytes = 16 * 1024;
 
     private static readonly TimeSpan ProfileCacheDuration = TimeSpan.FromMinutes(5);
 
@@ -29,13 +31,13 @@ internal sealed class SupabaseProfileDisplayNameProvider : IProfileDisplayNamePr
 
     private static readonly TimeSpan LookupTimeout = TimeSpan.FromSeconds(2);
 
-    private readonly IHttpClientFactory httpClientFactory;
+    private readonly HttpClient httpClient;
 
-    private readonly ILogger<SupabaseProfileDisplayNameProvider> logger;
+    private readonly ILogger<LovableProfileDisplayNameProvider> logger;
 
-    private readonly Uri? projectUri;
+    private readonly Uri? lookupUri;
 
-    private readonly string? serviceRoleKey;
+    private readonly string? sharedSecret;
 
     private readonly SemaphoreSlim lookupGate = new(8, 8);
 
@@ -43,44 +45,46 @@ internal sealed class SupabaseProfileDisplayNameProvider : IProfileDisplayNamePr
 
     private readonly Dictionary<string, CacheEntry> cache = new(StringComparer.Ordinal);
 
-    public SupabaseProfileDisplayNameProvider(
-        IHttpClientFactory httpClientFactory,
+    public LovableProfileDisplayNameProvider(
+        HttpClient httpClient,
         IConfiguration configuration,
-        ILogger<SupabaseProfileDisplayNameProvider> logger)
+        ILogger<LovableProfileDisplayNameProvider> logger)
     {
-        this.httpClientFactory = httpClientFactory;
+        this.httpClient = httpClient;
         this.logger = logger;
 
-        var projectUrl = configuration["Supabase:Url"];
-        this.serviceRoleKey = configuration["Supabase:ServiceRoleKey"];
-        if (string.IsNullOrWhiteSpace(projectUrl) || string.IsNullOrWhiteSpace(this.serviceRoleKey))
+        var configuredUri = configuration["Multiplayer:ProfileLookup:Url"];
+        this.sharedSecret = configuration["MULTIPLAYER_PROFILE_LOOKUP_SECRET"];
+        if (string.IsNullOrWhiteSpace(configuredUri) || string.IsNullOrWhiteSpace(this.sharedSecret))
         {
             this.logger.LogInformation(
-                "Supabase profile lookup is not configured; multiplayer seat display names will use the role-based fallback.");
+                "Multiplayer profile lookup is not configured; seat display names will use the role-based fallback.");
             return;
         }
 
-        if (this.serviceRoleKey.Length > 4096
-            || this.serviceRoleKey.Any(character => character <= ' ' || character > '~'))
+        if (this.sharedSecret.Length < 32
+            || this.sharedSecret.Length > 4096
+            || this.sharedSecret.Any(character => character <= ' ' || character > '~'))
         {
             this.logger.LogWarning(
-                "Supabase profile lookup has an invalid server credential; multiplayer seat display names will use the role-based fallback.");
-            this.serviceRoleKey = null;
+                "Multiplayer profile lookup has an invalid server credential; seat display names will use the role-based fallback.");
+            this.sharedSecret = null;
             return;
         }
 
-        if (!Uri.TryCreate(projectUrl, UriKind.Absolute, out var projectUri)
-            || projectUri.Scheme != Uri.UriSchemeHttps
-            || !string.IsNullOrEmpty(projectUri.Query)
-            || !string.IsNullOrEmpty(projectUri.Fragment))
+        if (!Uri.TryCreate(configuredUri, UriKind.Absolute, out var lookupUri)
+            || lookupUri.Scheme != Uri.UriSchemeHttps
+            || !string.IsNullOrEmpty(lookupUri.UserInfo)
+            || !string.IsNullOrEmpty(lookupUri.Query)
+            || !string.IsNullOrEmpty(lookupUri.Fragment))
         {
             this.logger.LogWarning(
-                "Supabase profile lookup requires a valid HTTPS Supabase project URL; multiplayer seat display names will use the role-based fallback.");
-            this.serviceRoleKey = null;
+                "Multiplayer profile lookup requires a valid HTTPS endpoint URL; seat display names will use the role-based fallback.");
+            this.sharedSecret = null;
             return;
         }
 
-        this.projectUri = projectUri;
+        this.lookupUri = lookupUri;
     }
 
     public async Task<IReadOnlyDictionary<string, string?>> ResolveAsync(
@@ -88,27 +92,47 @@ internal sealed class SupabaseProfileDisplayNameProvider : IProfileDisplayNamePr
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(userIds);
-        if (this.projectUri is null || this.serviceRoleKey is null)
+
+        var requestedUsers = userIds
+            .Select(userId => Guid.TryParseExact(userId, "D", out var parsedId)
+                ? (UserId: userId, CacheKey: parsedId.ToString("D"))
+                : default)
+            .Where(user => user.UserId is not null)
+            .DistinctBy(user => user.CacheKey, StringComparer.OrdinalIgnoreCase)
+            .Take(4)
+            .ToArray();
+        if (requestedUsers.Length == 0)
         {
             return new Dictionary<string, string?>(StringComparer.Ordinal);
         }
 
-        var distinctUserIds = userIds
-            .Where(userId => !string.IsNullOrWhiteSpace(userId) && userId.Length <= 256)
-            .Distinct(StringComparer.Ordinal)
-            .Take(4)
-            .ToArray();
-        var results = await Task.WhenAll(distinctUserIds.Select(userId => this.ResolveOneAsync(userId, cancellationToken)));
-        return results.ToDictionary(result => result.UserId, result => result.DisplayName, StringComparer.Ordinal);
-    }
-
-    private async Task<(string UserId, string? DisplayName)> ResolveOneAsync(
-        string userId,
-        CancellationToken cancellationToken)
-    {
-        if (this.TryGetCached(userId, out var cachedName))
+        var result = new Dictionary<string, string?>(requestedUsers.Length, StringComparer.Ordinal);
+        var uncachedUsers = new List<(string UserId, string CacheKey)>(requestedUsers.Length);
+        foreach (var user in requestedUsers)
         {
-            return (userId, cachedName);
+            if (this.TryGetCached(user.CacheKey, out var cachedName))
+            {
+                result[user.UserId] = cachedName;
+            }
+            else
+            {
+                uncachedUsers.Add(user);
+            }
+        }
+
+        if (uncachedUsers.Count == 0)
+        {
+            return result;
+        }
+
+        if (this.lookupUri is null || this.sharedSecret is null)
+        {
+            foreach (var user in uncachedUsers)
+            {
+                result[user.UserId] = null;
+            }
+
+            return result;
         }
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -118,21 +142,49 @@ internal sealed class SupabaseProfileDisplayNameProvider : IProfileDisplayNamePr
         {
             await this.lookupGate.WaitAsync(timeout.Token);
             gateAcquired = true;
-            if (this.TryGetCached(userId, out cachedName))
+
+            var usersToLookup = new List<(string UserId, string CacheKey)>(uncachedUsers.Count);
+            foreach (var user in uncachedUsers)
             {
-                return (userId, cachedName);
+                if (this.TryGetCached(user.CacheKey, out var cachedName))
+                {
+                    result[user.UserId] = cachedName;
+                }
+                else
+                {
+                    usersToLookup.Add(user);
+                }
             }
 
-            var lookup = await this.LookupAsync(userId, timeout.Token);
-            this.SetCached(userId, lookup.DisplayName, lookup.CacheDuration);
-            return (userId, lookup.DisplayName);
+            if (usersToLookup.Count > 0)
+            {
+                var lookup = await this.LookupAsync(usersToLookup, timeout.Token);
+                foreach (var user in usersToLookup)
+                {
+                    lookup.Names.TryGetValue(user.CacheKey, out var displayName);
+                    this.SetCached(
+                        user.CacheKey,
+                        displayName,
+                        lookup.Success
+                            ? displayName is null ? MissingProfileCacheDuration : ProfileCacheDuration
+                            : FailureCacheDuration);
+                    result[user.UserId] = displayName;
+                }
+            }
+
+            return result;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             this.logger.LogWarning(
-                "Supabase profile lookup timed out; multiplayer seat display names will use the role-based fallback.");
-            this.SetCached(userId, null, FailureCacheDuration);
-            return (userId, null);
+                "Multiplayer profile lookup timed out; seat display names will use the role-based fallback.");
+            foreach (var user in uncachedUsers)
+            {
+                this.SetCached(user.CacheKey, null, FailureCacheDuration);
+                result[user.UserId] = null;
+            }
+
+            return result;
         }
         finally
         {
@@ -143,90 +195,129 @@ internal sealed class SupabaseProfileDisplayNameProvider : IProfileDisplayNamePr
         }
     }
 
-    private async Task<LookupResult> LookupAsync(string userId, CancellationToken cancellationToken)
+    private async Task<ProfileLookupResult> LookupAsync(
+        IReadOnlyCollection<(string UserId, string CacheKey)> users,
+        CancellationToken cancellationToken)
     {
         try
         {
-            var requestUri = new Uri(
-                this.projectUri!,
-                $"/rest/v1/profiles?id=eq.{Uri.EscapeDataString(userId)}&select=id,display_name");
-            using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
-            request.Headers.TryAddWithoutValidation("apikey", this.serviceRoleKey);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", this.serviceRoleKey);
+            using var request = new HttpRequestMessage(HttpMethod.Post, this.lookupUri);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", this.sharedSecret);
+            request.Content = JsonContent.Create(new ProfileLookupRequest(users.Select(user => user.UserId).ToArray()));
 
-            using var response = await this.httpClientFactory
-                .CreateClient("SupabaseProfiles")
-                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            if (response.StatusCode == HttpStatusCode.NotFound)
-            {
-                return new LookupResult(null, MissingProfileCacheDuration);
-            }
-
+            using var response = await this.httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
                 this.logger.LogWarning(
-                    "Supabase profile lookup returned HTTP {StatusCode}; multiplayer seat display names will use the role-based fallback.",
+                    "Multiplayer profile lookup returned HTTP {StatusCode}; seat display names will use the role-based fallback.",
                     (int)response.StatusCode);
-                return new LookupResult(null, FailureCacheDuration);
+                return FailedLookup();
             }
 
-            await using var content = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var document = await JsonDocument.ParseAsync(content, cancellationToken: cancellationToken);
-            if (document.RootElement.ValueKind != JsonValueKind.Array
-                || document.RootElement.GetArrayLength() == 0)
-            {
-                return new LookupResult(null, MissingProfileCacheDuration);
-            }
-
-            var profile = document.RootElement[0];
-            if (profile.ValueKind != JsonValueKind.Object)
+            if (response.Content.Headers.ContentLength is > MaximumResponseBytes)
             {
                 this.logger.LogWarning(
-                    "Supabase profile lookup returned an unexpected row; multiplayer seat display names will use the role-based fallback.");
-                return new LookupResult(null, FailureCacheDuration);
+                    "Multiplayer profile lookup returned an oversized response; seat display names will use the role-based fallback.");
+                return FailedLookup();
             }
 
-            var returnedId = ReadString(profile, "id");
-            if (!string.Equals(returnedId, userId, StringComparison.Ordinal))
+            var responseBytes = await ReadBoundedResponseAsync(response.Content, cancellationToken);
+            if (responseBytes is null)
             {
                 this.logger.LogWarning(
-                    "Supabase profile lookup returned an unexpected row; multiplayer seat display names will use the role-based fallback.");
-                return new LookupResult(null, FailureCacheDuration);
+                    "Multiplayer profile lookup returned an oversized response; seat display names will use the role-based fallback.");
+                return FailedLookup();
             }
 
-            var displayName = Normalize(ReadString(profile, "display_name"));
-            return new LookupResult(displayName, displayName is null ? MissingProfileCacheDuration : ProfileCacheDuration);
+            using var document = JsonDocument.Parse(responseBytes, new JsonDocumentOptions { MaxDepth = 8 });
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("profiles", out var profiles)
+                || profiles.ValueKind != JsonValueKind.Array
+                || profiles.GetArrayLength() > 4)
+            {
+                this.logger.LogWarning(
+                    "Multiplayer profile lookup returned an invalid response; seat display names will use the role-based fallback.");
+                return FailedLookup();
+            }
+
+            var requestedIds = users
+                .Select(user => user.CacheKey)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var names = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var profile in profiles.EnumerateArray())
+            {
+                if (profile.ValueKind != JsonValueKind.Object
+                    || !profile.TryGetProperty("id", out var idElement)
+                    || idElement.ValueKind != JsonValueKind.String
+                    || !Guid.TryParseExact(idElement.GetString(), "D", out var parsedId))
+                {
+                    continue;
+                }
+
+                var cacheKey = parsedId.ToString("D");
+                if (!requestedIds.Contains(cacheKey)
+                    || !profile.TryGetProperty("displayName", out var displayNameElement)
+                    || (displayNameElement.ValueKind != JsonValueKind.String
+                        && displayNameElement.ValueKind != JsonValueKind.Null))
+                {
+                    continue;
+                }
+
+                names[cacheKey] = Normalize(
+                    displayNameElement.ValueKind == JsonValueKind.String ? displayNameElement.GetString() : null);
+            }
+
+            return new ProfileLookupResult(true, names);
         }
         catch (HttpRequestException)
         {
             this.logger.LogWarning(
-                "Supabase profile lookup failed; multiplayer seat display names will use the role-based fallback.");
-            return new LookupResult(null, FailureCacheDuration);
+                "Multiplayer profile lookup failed; seat display names will use the role-based fallback.");
+            return FailedLookup();
         }
         catch (IOException)
         {
             this.logger.LogWarning(
-                "Supabase profile lookup failed while reading its response; multiplayer seat display names will use the role-based fallback.");
-            return new LookupResult(null, FailureCacheDuration);
+                "Multiplayer profile lookup failed while reading its response; seat display names will use the role-based fallback.");
+            return FailedLookup();
         }
         catch (JsonException)
         {
             this.logger.LogWarning(
-                "Supabase profile lookup returned invalid JSON; multiplayer seat display names will use the role-based fallback.");
-            return new LookupResult(null, FailureCacheDuration);
-        }
-        catch (UriFormatException)
-        {
-            this.logger.LogWarning(
-                "Supabase profile lookup could not form a safe request; multiplayer seat display names will use the role-based fallback.");
-            return new LookupResult(null, FailureCacheDuration);
+                "Multiplayer profile lookup returned invalid JSON; seat display names will use the role-based fallback.");
+            return FailedLookup();
         }
     }
 
-    private static string? ReadString(JsonElement profile, string propertyName) =>
-        profile.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
-            ? property.GetString()
-            : null;
+    private static ProfileLookupResult FailedLookup() =>
+        new(false, new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase));
+
+    private static async Task<byte[]?> ReadBoundedResponseAsync(
+        HttpContent content,
+        CancellationToken cancellationToken)
+    {
+        await using var responseStream = await content.ReadAsStreamAsync(cancellationToken);
+        using var responseBuffer = new MemoryStream();
+        var buffer = new byte[4096];
+        while (true)
+        {
+            var bytesRead = await responseStream.ReadAsync(buffer, cancellationToken);
+            if (bytesRead == 0)
+            {
+                return responseBuffer.ToArray();
+            }
+
+            if (responseBuffer.Length + bytesRead > MaximumResponseBytes)
+            {
+                return null;
+            }
+
+            responseBuffer.Write(buffer, 0, bytesRead);
+        }
+    }
 
     private static string? Normalize(string? value)
     {
@@ -325,7 +416,9 @@ internal sealed class SupabaseProfileDisplayNameProvider : IProfileDisplayNamePr
         }
     }
 
-    private sealed record CacheEntry(string? DisplayName, DateTimeOffset ExpiresAt);
+    private sealed record ProfileLookupRequest(IReadOnlyCollection<string> UserIds);
 
-    private sealed record LookupResult(string? DisplayName, TimeSpan CacheDuration);
+    private sealed record ProfileLookupResult(bool Success, Dictionary<string, string?> Names);
+
+    private sealed record CacheEntry(string? DisplayName, DateTimeOffset ExpiresAt);
 }
