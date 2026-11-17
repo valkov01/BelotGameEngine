@@ -15,6 +15,8 @@ public sealed record TeamMatchInactivityReportRequest(int Table, PlayerPosition 
 public sealed record TeamMatchHumanActionRequest(
     long ExpectedTableRevision, string? CommandId, GameActionRequest? Action);
 
+public sealed record ResumeTeamMatchBotsRequest(int Table);
+
 public sealed record TeamMatchReportDto(
     string ReportId, int Table, PlayerPosition Seat, PlayerPosition ReporterSeat,
     string? Reason, DateTimeOffset CreatedAt);
@@ -30,7 +32,7 @@ public sealed record TeamMatchOrganizerTableDto(
     IReadOnlyList<PlayedCardDto> CurrentTrick, IReadOnlyList<TrickDto> CompletedTricks,
     IReadOnlyList<int> CardCounts);
 
-public sealed record TeamMatchOrganizerOverviewDto(
+internal sealed record TeamMatchOrganizerOverviewDto(
     string MatchId, bool BarometerEnabled, int ScheduledDeals,
     IReadOnlyList<TeamMatchOrganizerTableDto> Tables,
     TeamMatchResultsView Results,
