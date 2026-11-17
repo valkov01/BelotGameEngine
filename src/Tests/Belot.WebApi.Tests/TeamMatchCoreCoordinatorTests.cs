@@ -148,6 +148,109 @@ public sealed class TeamMatchCoreCoordinatorTests
         Assert.Equal(0, coordinator.GetHangingPoints(2));
     }
 
+    [Fact]
+    public void AnActualPlayedHangingDealExtendsBothTablesAndResolvesViaFurtherPlay()
+    {
+        // Search a bounded, deterministic seed range for an actual 130:130
+        // No Trumps round that produces hanging via the REAL engine ScoreManager.
+        // The first three deals are deliberately fully passed at both tables.
+        TeamMatchCoreCoordinator? chosen = null;
+        var hangingSeed = -1;
+        for (var seed = 0; seed < 1200; seed++)
+        {
+            var match = new TeamMatchCoreCoordinator(4, seed);
+            for (var board = 1; board <= 3; board++)
+            {
+                PassOneBoard(match, 1);
+                PassOneBoard(match, 2);
+            }
+
+            PlayOneBoard(match, 1, BidType.NoTrumps);
+            if (match.GetHangingPoints(1) == 0)
+            {
+                continue;
+            }
+
+            chosen = match;
+            hangingSeed = seed;
+            break;
+        }
+
+        Assert.True(chosen != null, "No naturally hanging No Trumps deal found in deterministic seed range.");
+        var coordinator = chosen!;
+        Assert.True(hangingSeed >= 0);
+        Assert.Equal(4, coordinator.GetRoundsPlayed(1));
+        Assert.True(coordinator.GetHangingPoints(1) > 0);
+        Assert.Equal(4, coordinator.AllowedDeals);
+        Assert.False(coordinator.IsFinished);
+
+        // The second table passed: its fourth deal is 0:0. Both advance
+        // together because only Table 1 has hanging. Same fifth deck and dealer.
+        PassOneBoard(coordinator, 2);
+        Assert.Equal(5, coordinator.AllowedDeals);
+        Assert.False(coordinator.IsFinished);
+        Assert.Equal(4, coordinator.GetRoundsPlayed(2));
+        Assert.Equal(5, coordinator.GetSeatView(1, PlayerPosition.South).RoundNumber);
+        Assert.Equal(5, coordinator.GetSeatView(2, PlayerPosition.South).RoundNumber);
+        Assert.Equal(0, coordinator.GetHangingPoints(2));
+        AssertSameCurrentDeal(coordinator, 5);
+
+        // Play true scored extra deals until both tables' hanging points clear;
+        // if either hangs again, the product rule extends BOTH tables once more.
+        var extra = 0;
+        while (!coordinator.IsFinished && extra++ < 15)
+        {
+            var previousAllowed = coordinator.AllowedDeals;
+            PlayOneBoard(coordinator, 1, BidType.NoTrumps);
+            PassOneBoard(coordinator, 2);
+            if (!coordinator.IsFinished)
+            {
+                Assert.Equal(previousAllowed + 1, coordinator.AllowedDeals);
+                AssertSameCurrentDeal(coordinator, previousAllowed + 1);
+            }
+        }
+
+        Assert.True(coordinator.IsFinished, "Real hanging points did not resolve within extra-deal guard.");
+        Assert.True(coordinator.AllowedDeals > coordinator.ScheduledDeals);
+        Assert.Equal(coordinator.AllowedDeals, coordinator.GetRoundsPlayed(1));
+        Assert.Equal(coordinator.AllowedDeals, coordinator.GetRoundsPlayed(2));
+        Assert.Equal(0, coordinator.GetHangingPoints(1));
+        Assert.Equal(0, coordinator.GetHangingPoints(2));
+    }
+
+    private static void PlayOneBoard(TeamMatchCoreCoordinator match, int table, BidType contract)
+    {
+        var before = match.GetRoundsPlayed(table);
+        var guard = 0;
+        while (match.GetRoundsPlayed(table) == before)
+        {
+            Assert.True(++guard < 100, "A full scored deal exceeded the decision safety budget.");
+            var publicView = match.GetSeatView(table, PlayerPosition.South);
+            var seat = publicView.ToMove;
+            Assert.NotEqual(PlayerPosition.Unknown, seat);
+            var view = match.GetSeatView(table, seat);
+            BelotAction action;
+            if (view.Decision == BelotDecision.Bid)
+            {
+                action = BelotAction.Bid(view.Bids.Count == 0 ? contract : BidType.Pass);
+            }
+            else if (view.Decision == BelotDecision.Announce)
+            {
+                action = BelotAction.Declare(null);
+            }
+            else
+            {
+                Assert.Equal(BelotDecision.PlayCard, view.Decision);
+                Assert.NotEmpty(view.PlayableCards);
+                action = BelotAction.PlayCard(view.PlayableCards[0]);
+            }
+
+            Assert.Equal(BelotActResult.Ok, match.Act(table, seat, action));
+        }
+
+        Assert.Equal(before + 1, match.GetRoundsPlayed(table));
+    }
+
     private static void AssertSameCurrentDeal(TeamMatchCoreCoordinator coordinator, int round)
     {
         var seats = new[]
