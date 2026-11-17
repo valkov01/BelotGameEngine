@@ -91,6 +91,63 @@ public sealed class TeamMatchCoreCoordinatorTests
         Assert.Throws<ArgumentOutOfRangeException>(() => coordinator.GetSeatView(3, PlayerPosition.South));
     }
 
+    [Fact]
+    public void TwentyPlayedDealsIgnore151AndAllowDifferentBidsAtIdenticalTables()
+    {
+        var coordinator = new TeamMatchCoreCoordinator(20, 2026);
+        var steps = 0;
+        while (!coordinator.IsFinished && steps++ < 8000)
+        {
+            var progressed = false;
+            for (var table = 1; table <= 2; table++)
+            {
+                var publicProgress = coordinator.GetSeatView(table, PlayerPosition.South);
+                if (publicProgress.Decision == BelotDecision.None)
+                {
+                    continue; // This table is at the final shared boundary.
+                }
+
+                var seat = publicProgress.ToMove;
+                var own = coordinator.GetSeatView(table, seat);
+                BelotAction action;
+                if (own.Decision == BelotDecision.Bid)
+                {
+                    // Different bidding decisions, but the same canonical deck.
+                    var openingBid = table == 1 ? BidType.AllTrumps : BidType.NoTrumps;
+                    action = BelotAction.Bid(own.Bids.Count == 0 ? openingBid : BidType.Pass);
+                }
+                else if (own.Decision == BelotDecision.Announce)
+                {
+                    action = BelotAction.Declare(null);
+                }
+                else
+                {
+                    Assert.NotEmpty(own.PlayableCards);
+                    action = BelotAction.PlayCard(own.PlayableCards[0]);
+                }
+
+                Assert.Equal(BelotActResult.Ok, coordinator.Act(table, seat, action));
+                progressed = true;
+            }
+
+            Assert.True(progressed || coordinator.IsFinished, "Both tables stalled before completing the match.");
+        }
+
+        Assert.True(coordinator.IsFinished, "The scheduled match did not finish within the safety action budget.");
+        Assert.True(coordinator.AllowedDeals >= 20);
+        Assert.Equal(coordinator.AllowedDeals, coordinator.GetRoundsPlayed(1));
+        Assert.Equal(coordinator.AllowedDeals, coordinator.GetRoundsPlayed(2));
+
+        var tableOne = coordinator.GetSeatView(1, PlayerPosition.South);
+        var tableTwo = coordinator.GetSeatView(2, PlayerPosition.South);
+        Assert.True(tableOne.SouthNorthPoints > 151 || tableOne.EastWestPoints > 151);
+        Assert.True(tableTwo.SouthNorthPoints > 151 || tableTwo.EastWestPoints > 151);
+        Assert.Equal(coordinator.AllowedDeals, tableOne.PreviousRounds.Count);
+        Assert.Equal(coordinator.AllowedDeals, tableTwo.PreviousRounds.Count);
+        Assert.Equal(0, coordinator.GetHangingPoints(1));
+        Assert.Equal(0, coordinator.GetHangingPoints(2));
+    }
+
     private static void AssertSameCurrentDeal(TeamMatchCoreCoordinator coordinator, int round)
     {
         var seats = new[]
