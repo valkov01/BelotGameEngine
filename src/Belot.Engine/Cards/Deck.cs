@@ -35,10 +35,44 @@
             this.currentCardIndex = 0;
         }
 
+        /// <summary>
+        /// Loads a predetermined 32-card deal in the normal dealing order, without shuffling.
+        /// Used by authoritative multi-table game coordinators to replay the exact same deal.
+        /// </summary>
+        /// <param name="order">Exactly one of each of the 32 cards.</param>
+        internal void LoadOrder(System.Collections.Generic.IReadOnlyList<Card> order)
+        {
+            if (order == null || order.Count != Card.AllCards.Length)
+            {
+                throw new ArgumentException("A predetermined deal must contain exactly 32 cards.", nameof(order));
+            }
+
+            var seen = new bool[Card.AllCards.Length];
+            for (var i = 0; i < order.Count; i++)
+            {
+                var card = order[i];
+                if (card == null || card.GetHashCode() < 0 || card.GetHashCode() >= seen.Length
+                    || !ReferenceEquals(Card.AllCards[card.GetHashCode()], card)
+                    || seen[card.GetHashCode()])
+                {
+                    throw new ArgumentException("A predetermined deal must contain each card exactly once.", nameof(order));
+                }
+
+                seen[card.GetHashCode()] = true;
+            }
+
+            for (var i = 0; i < order.Count; i++)
+            {
+                this.listOfCards[i] = order[i];
+            }
+
+            this.currentCardIndex = 0;
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public Card GetNextCard() => this.listOfCards[this.currentCardIndex++];
 
-        /// <summary>The cards in the order they come off the deck since the last shuffle.</summary>
-        internal Card[] CopyOrder() => (Card[])this.listOfCards.Clone();
+        /// <summary>Returns a defensive copy of the full private deck order for server-side board preparation.</summary>
+        public Card[] CopyOrder() => (Card[])this.listOfCards.Clone();
     }
 }
