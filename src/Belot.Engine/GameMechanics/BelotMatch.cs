@@ -53,6 +53,12 @@
 
         private readonly PlayerPosition manualCardPlaySeats;
 
+        private readonly bool manualRoundProgression;
+
+        private readonly Func<int, IReadOnlyList<Card>> dealOrderProvider;
+
+        private bool awaitingRoundAdvance;
+
         private readonly List<BelotRoundRecord> finishedRounds = new List<BelotRoundRecord>();
 
         private Round round;
@@ -87,7 +93,9 @@
                 (options ?? new BelotMatchOptions()).FirstToPlay,
                 null,
                 (options ?? new BelotMatchOptions()).RecordHistory,
-                (options ?? new BelotMatchOptions()).ManualCardPlaySeats)
+                (options ?? new BelotMatchOptions()).ManualCardPlaySeats,
+                (options ?? new BelotMatchOptions()).ManualRoundProgression,
+                (options ?? new BelotMatchOptions()).DealOrderProvider)
         {
         }
 
@@ -97,7 +105,9 @@
             PlayerPosition firstToPlay,
             Func<int, PlayerPosition, int, int, int, RoundResult> scriptedRounds,
             bool recordHistory = false,
-            PlayerPosition manualCardPlaySeats = PlayerPosition.Unknown)
+            PlayerPosition manualCardPlaySeats = PlayerPosition.Unknown,
+            bool manualRoundProgression = false,
+            Func<int, IReadOnlyList<Card>> dealOrderProvider = null)
         {
             if (firstToPlay != PlayerPosition.South && firstToPlay != PlayerPosition.East
                                                     && firstToPlay != PlayerPosition.North
@@ -111,6 +121,8 @@
             this.scriptedRounds = scriptedRounds;
             this.recordHistory = recordHistory;
             this.manualCardPlaySeats = manualCardPlaySeats;
+            this.manualRoundProgression = manualRoundProgression;
+            this.dealOrderProvider = dealOrderProvider;
             this.firstInRound = firstToPlay;
         }
 
@@ -125,6 +137,9 @@
 
         /// <summary>Gets the number of finished deals (passed-out ones included).</summary>
         public int RoundsPlayed { get; private set; }
+
+        /// <summary>True when a manually advanced match has scored its current deal and awaits the coordinator.</summary>
+        public bool IsAwaitingRoundAdvance => this.awaitingRoundAdvance;
 
         /// <summary>Gets a value indicating whether the match is over.</summary>
         public bool IsFinished { get; private set; }
@@ -164,6 +179,55 @@
             this.started = true;
             this.roundNumber = 1;
             this.StartRound();
+        }
+
+        /// <summary>
+        /// Advances an opt-in manually progressed match after a completely scored deal.
+        /// The coordinator may let tables move independently or synchronize a final-deal extension.
+        /// </summary>
+        public void AdvanceToNextRound()
+        {
+            if (!this.manualRoundProgression || !this.awaitingRoundAdvance || this.IsFinished)
+            {
+                throw new InvalidOperationException("The current match is not awaiting an external round advance.");
+            }
+
+            this.awaitingRoundAdvance = false;
+            this.roundNumber++;
+            this.firstInRound = this.firstInRound.Next();
+            this.StartRound();
+        }
+
+        /// <summary>
+        /// Completes a manually progressed match normally after its last scored deal.
+        /// Unlike Stop, this produces a game result and does not discard a scored round.
+        /// The external coordinator decides when all configured/hanging-extension deals are done.
+        /// </summary>
+        public void CompleteAfterRound()
+        {
+            if (!this.manualRoundProgression || !this.awaitingRoundAdvance || this.IsFinished)
+            {
+                throw new InvalidOperationException("Only a manually progressed scored round can complete the match.");
+            }
+
+            this.awaitingRoundAdvance = false;
+            this.IsFinished = true;
+            this.Winner = this.SouthNorthPoints == this.EastWestPoints
+                ? PlayerPosition.Unknown
+                : this.SouthNorthPoints > this.EastWestPoints
+                    ? PlayerPosition.SouthNorthTeam
+                    : PlayerPosition.EastWestTeam;
+            this.Result = new GameResult
+            {
+                RoundsPlayed = this.RoundsPlayed,
+                SouthNorthPoints = this.SouthNorthPoints,
+                EastWestPoints = this.EastWestPoints,
+            };
+
+            for (var i = 0; i < 4; i++)
+            {
+                this.observers[i]?.EndOfGame(this.Result);
+            }
         }
 
         /// <summary>
@@ -678,7 +742,8 @@
                 this.EastWestPoints,
                 this.HangingPoints,
                 this.recordHistory,
-                this.manualCardPlaySeats);
+                this.manualCardPlaySeats,
+                this.dealOrderProvider?.Invoke(this.roundNumber));
         }
 
         // Adds the deal to the score and ends the match or deals the next one; true when the match
@@ -694,6 +759,12 @@
             this.EastWestPoints += result.EastWestPoints;
             this.HangingPoints = result.HangingPoints;
             this.RoundsPlayed++;
+
+            if (this.manualRoundProgression)
+            {
+                this.awaitingRoundAdvance = true;
+                return true;
+            }
 
             // A team wins with 151+ and more points than the other team, on a deal in which it
             // scored. A capot deal never ends the game ("С капо не се излиза"), and neither does

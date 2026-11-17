@@ -51,7 +51,8 @@
             int eastWestPoints,
             int hangingPoints,
             bool recordDeal = false,
-            PlayerPosition manualCardPlaySeats = PlayerPosition.Unknown)
+            PlayerPosition manualCardPlaySeats = PlayerPosition.Unknown,
+            IReadOnlyList<Card> predeterminedDealOrder = null)
         {
             this.observers = observers;
             this.deck = deck;
@@ -63,7 +64,15 @@
             this.hangingPoints = hangingPoints;
             this.manualCardPlaySeats = manualCardPlaySeats;
 
-            deck.Shuffle();
+            if (predeterminedDealOrder == null)
+            {
+                deck.Shuffle();
+            }
+            else
+            {
+                deck.LoadOrder(predeterminedDealOrder);
+            }
+
             if (recordDeal)
             {
                 this.DealOrder = deck.CopyOrder();
