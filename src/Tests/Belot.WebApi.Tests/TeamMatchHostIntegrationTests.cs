@@ -54,6 +54,21 @@ public sealed class TeamMatchHostIntegrationTests : IDisposable
         Assert.False(vacant.IsOccupied);
         Assert.Null(vacant.BotProfileId);
 
+        using (var privateNotice = await this.Send(HttpMethod.Get, root + "/notices", guest))
+        {
+            Assert.Equal(HttpStatusCode.OK, privateNotice.StatusCode);
+            var notice = Assert.Single(
+                (await privateNotice.Content.ReadFromJsonAsync<TeamMatchRemovalNoticeDto[]>(JsonOptions))!);
+            Assert.Equal(2, notice.Table);
+            Assert.Equal(PlayerPosition.South, notice.Seat);
+            Assert.Equal("Вие бяхте сменен от организатора на мача.", notice.Message);
+        }
+
+        using (var deniedNotice = await this.Send(HttpMethod.Get, root + "/notices", Guid.NewGuid().ToString()))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, deniedNotice.StatusCode);
+        }
+
         using var revoked = await this.Send(HttpMethod.Get, root + "/game", guest);
         Assert.Equal(HttpStatusCode.Forbidden, revoked.StatusCode);
         using var oldAction = await this.Send(HttpMethod.Post, root + "/game/actions", guest,
