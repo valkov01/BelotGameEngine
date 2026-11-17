@@ -21,6 +21,7 @@ internal static class TeamMatchHostEndpoints
         group.MapGet("/{matchId}/notices", GetRemovalNotices);
         group.MapPost("/{matchId}/invitations/{invitationId}/accept", AcceptReplacement);
         group.MapGet("/{matchId}/organizer", GetOrganizer);
+        group.MapGet("/{matchId}/results", GetResults);
         group.MapPost("/{matchId}/reports", ReportInactive);
         group.MapPost("/{matchId}/organizer/kick", Kick);
         group.MapPost("/{matchId}/organizer/invite-replacement", InviteReplacement);
@@ -46,6 +47,11 @@ internal static class TeamMatchHostEndpoints
         Respond(
             rooms.AcceptReplacement(matchId, UserId(caller), invitationId),
             result => Results.Ok(result.Lobby));
+
+    private static IResult GetResults(
+        string matchId, ClaimsPrincipal caller, TeamMatchLobbyService rooms) =>
+        Respond(rooms.GetMemberResults(matchId, UserId(caller)),
+            result => Results.Ok(result.Results));
 
     private static async Task<IResult> GetOrganizer(
         string matchId, ClaimsPrincipal caller, TeamMatchLobbyService rooms,
