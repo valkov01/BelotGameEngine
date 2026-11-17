@@ -242,6 +242,7 @@ internal sealed partial class TeamMatchLobbyService
 
             target.UserId = callerUserId;
             target.ReservedUserId = null;
+            match.PreStartInvitations.Remove((request.Table, request.Seat));
             return new TeamMatchLobbyResult(TeamMatchLobbyStatus.Success, View(match, callerUserId));
         }
     }
@@ -359,6 +360,16 @@ internal sealed partial class TeamMatchLobbyService
             }
 
             target.ReservedUserId = request.ReservedUserId;
+            match.PreStartInvitations.Remove((request.Table, request.Seat));
+            if (request.ReservedUserId != null)
+            {
+                match.PreStartInvitations.Add(
+                    (request.Table, request.Seat),
+                    new TeamMatchReplacementInvitationInternal(
+                        NewSecret(24), request.ReservedUserId,
+                        request.Table, request.Seat, DateTimeOffset.UtcNow));
+            }
+
             return new TeamMatchLobbyResult(TeamMatchLobbyStatus.Success, View(match, callerUserId));
         }
     }
