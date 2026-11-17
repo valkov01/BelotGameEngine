@@ -179,6 +179,116 @@ public sealed class TeamMatchHostIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task ReplacingPlayerMidDealPreservesRemainingCardsAndAllowsNewControllerToAct()
+    {
+        var fx = await this.StartAsync();
+        using var first = await this.Send(HttpMethod.Get, fx.Root + "/game", fx.Guest);
+        var state = (await first.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
+        Assert.Equal(1, state.State.RoundNumber);
+        var guard = 0;
+
+        // Actually execute the auction and at least one PLAYED CARD; this is
+        // not just a pre-auction handover test.
+        while (state.State.Hand.Count >= 8 && guard++ < 20)
+        {
+            GameActionRequest move = state.State.Decision switch
+            {
+                "Bid" => new GameActionRequest
+                {
+                    Bid = state.State.Bids.Count == 0 ? "NoTrumps" : "Pass",
+                },
+                "Announce" => new GameActionRequest { Announces = Array.Empty<AnnounceRequest>() },
+                "PlayCard" => new GameActionRequest { Card = state.State.PlayableCards[0] },
+                _ => throw new InvalidOperationException("Unexpected decision: " + state.State.Decision),
+            };
+            using var played = await this.Send(HttpMethod.Post, fx.Root + "/game/actions", fx.Guest,
+                new TeamMatchHumanActionRequest(state.Revision, "mid-deal-" + guard, move));
+            Assert.Equal(HttpStatusCode.OK, played.StatusCode);
+            state = (await played.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
+        }
+
+        Assert.True(state.State.Hand.Count < 8, "A human should have played at least one card.");
+        Assert.Equal(1, state.State.RoundNumber);
+        var hand = state.State.Hand.ToArray();
+        var bids = state.State.Bids.ToArray();
+        var cardsAlreadyPlayed = state.State.Tricks.Sum(trick => trick.Cards.Count)
+            + state.State.CurrentTrick.Count;
+        Assert.True(cardsAlreadyPlayed >= 1);
+
+        using var kicked = await this.Send(HttpMethod.Post, fx.Root + "/organizer/kick", fx.Host,
+            new { table = 2, seat = PlayerPosition.South });
+        Assert.Equal(HttpStatusCode.OK, kicked.StatusCode);
+
+        var newUser = Guid.NewGuid().ToString();
+        using var invitation = await this.Send(HttpMethod.Post,
+            fx.Root + "/organizer/invite-replacement", fx.Host,
+            new { table = 2, seat = PlayerPosition.South, userId = newUser });
+        Assert.Equal(HttpStatusCode.OK, invitation.StatusCode);
+        var invite = (await invitation.Content.ReadFromJsonAsync<TeamMatchReplacementInvitationDto>(JsonOptions))!;
+        using var accepted = await this.Send(HttpMethod.Post,
+            fx.Root + "/invitations/" + invite.InvitationId + "/accept", newUser);
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+
+        using var resumed = await this.Send(HttpMethod.Get, fx.Root + "/game", newUser);
+        var restored = (await resumed.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
+        Assert.False(restored.IsPaused);
+        Assert.True(restored.Revision > state.Revision);
+        Assert.Equal(hand, restored.State.Hand);
+        Assert.Equal(bids, restored.State.Bids);
+        Assert.Equal(cardsAlreadyPlayed,
+            restored.State.Tricks.Sum(trick => trick.Cards.Count)
+                + restored.State.CurrentTrick.Count);
+        Assert.Equal(1, restored.State.RoundNumber);
+
+        using var old = await this.Send(HttpMethod.Post, fx.Root + "/game/actions", fx.Guest,
+            new TeamMatchHumanActionRequest(state.Revision, "former-actor", new GameActionRequest { Bid = "Pass" }));
+        Assert.Equal(HttpStatusCode.Forbidden, old.StatusCode);
+
+        // The replacement can continue the current deal without a new deal.
+        var next = restored.State.Decision switch
+        {
+            "Bid" => new GameActionRequest { Bid = "Pass" },
+            "Announce" => new GameActionRequest { Announces = Array.Empty<AnnounceRequest>() },
+            "PlayCard" => new GameActionRequest { Card = restored.State.PlayableCards[0] },
+            _ => throw new InvalidOperationException("Unexpected decision after replacement"),
+        };
+        using var newAction = await this.Send(HttpMethod.Post, fx.Root + "/game/actions", newUser,
+            new TeamMatchHumanActionRequest(restored.Revision, "replacement-resume", next));
+        Assert.Equal(HttpStatusCode.OK, newAction.StatusCode);
+    }
+
+    [Fact]
+    public async Task BotSeatCanBeInvitedAndTransferredOnlyOnAcceptance()
+    {
+        var fx = await this.StartAsync();
+        var invited = Guid.NewGuid().ToString();
+        using var inviteResponse = await this.Send(HttpMethod.Post,
+            fx.Root + "/organizer/invite-replacement", fx.Host,
+            new { table = 2, seat = PlayerPosition.East, userId = invited });
+        Assert.Equal(HttpStatusCode.OK, inviteResponse.StatusCode);
+        var invite = (await inviteResponse.Content.ReadFromJsonAsync<TeamMatchReplacementInvitationDto>(JsonOptions))!;
+        using var before = await this.Send(HttpMethod.Get, fx.Root, fx.Guest);
+        var oldRoom = (await before.Content.ReadFromJsonAsync<TeamMatchLobbyDto>(JsonOptions))!;
+        Assert.Equal("skilled", oldRoom.Seats.Single(
+            s => s.Table == 2 && s.Seat == PlayerPosition.East).BotProfileId);
+
+        using var accepted = await this.Send(HttpMethod.Post,
+            fx.Root + "/invitations/" + invite.InvitationId + "/accept", invited);
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        using var ownView = await this.Send(HttpMethod.Get, fx.Root + "/game", invited);
+        Assert.Equal(HttpStatusCode.OK, ownView.StatusCode);
+        var snapshot = (await ownView.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
+        Assert.Equal(2, snapshot.Table);
+        Assert.Equal(PlayerPosition.East, snapshot.YourSeat);
+        Assert.Equal(5, snapshot.State.Hand.Count);
+        Assert.Equal(1, snapshot.State.RoundNumber);
+        using var after = await this.Send(HttpMethod.Get, fx.Root, fx.Guest);
+        var newRoom = (await after.Content.ReadFromJsonAsync<TeamMatchLobbyDto>(JsonOptions))!;
+        Assert.Null(newRoom.Seats.Single(
+            s => s.Table == 2 && s.Seat == PlayerPosition.East).BotProfileId);
+    }
+
+    [Fact]
     public async Task NonHostCannotControlOrObserveAndReportsAreMemberOnly()
     {
         var fx = await this.StartAsync();
