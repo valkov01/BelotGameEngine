@@ -8,6 +8,23 @@ using Xunit;
 
 public sealed class TeamMatchCoreCoordinatorTests
 {
+    [Fact]
+    public void ProductionConstructorGeneratesSharedValidBoardsWithoutASeed()
+    {
+        var match = new TeamMatchCoreCoordinator(4);
+        var board1 = match.GetBoardForAudit(1).ToArray();
+        Assert.Equal(32, board1.Length);
+        Assert.Equal(32, board1.Distinct().Count());
+        AssertSameCurrentDeal(match, 1);
+
+        PassOneBoard(match, 1);
+        PassOneBoard(match, 2);
+        var board2 = match.GetBoardForAudit(2).ToArray();
+        Assert.Equal(32, board2.Length);
+        Assert.Equal(32, board2.Distinct().Count());
+        AssertSameCurrentDeal(match, 2);
+    }
+
     [Theory]
     [InlineData(3)]
     [InlineData(21)]
