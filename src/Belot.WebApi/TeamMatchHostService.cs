@@ -80,6 +80,9 @@ internal sealed partial class TeamMatchLobbyService
         public Dictionary<(int Table, PlayerPosition Seat), TeamMatchReplacementInvitationInternal>
             ReplacementInvitations { get; } = new();
 
+        public Dictionary<(int Table, PlayerPosition Seat), TeamMatchReplacementInvitationInternal>
+            PreStartInvitations { get; } = new();
+
         public Dictionary<(int Table, PlayerPosition Seat), IPlayer> BotPlayers { get; } = new();
 
         public bool[] BotAutomationPending { get; } = new bool[3];
@@ -310,7 +313,8 @@ internal sealed partial class TeamMatchLobbyService
         lock (this.gate)
         {
             var list = this.rooms.Values
-                .SelectMany(room => room.ReplacementInvitations.Values
+                .SelectMany(room => room.PreStartInvitations.Values
+                    .Concat(room.ReplacementInvitations.Values)
                     .Where(invite => invite.UserId == userId)
                     .Select(invite => PublicInvite(room, invite))).ToArray();
             return new TeamMatchHostResult(
@@ -329,10 +333,35 @@ internal sealed partial class TeamMatchLobbyService
                 return new TeamMatchHostResult(TeamMatchLobbyStatus.NotFound);
             }
 
-            if (room.Game == null || string.IsNullOrWhiteSpace(invitationId)
-                || IsMember(room, userId))
+            if (string.IsNullOrWhiteSpace(invitationId) || IsMember(room, userId))
             {
-                return ConflictHost("This replacement invitation cannot be accepted.");
+                return ConflictHost("This invitation cannot be accepted.");
+            }
+
+            // The exact-seat prestart reservation uses the SAME private
+            // authenticated inbox/accept endpoint, without requiring a shared
+            // general lobby code. It is consumed only by its named recipient.
+            if (room.Game == null)
+            {
+                var pending = room.PreStartInvitations.FirstOrDefault(pair =>
+                    pair.Value.Id == invitationId && pair.Value.UserId == userId);
+                if (pending.Value == null)
+                {
+                    return new TeamMatchHostResult(TeamMatchLobbyStatus.Forbidden);
+                }
+
+                var chosen = FindSeat(room, pending.Value.Table, pending.Value.Seat)!;
+                if (chosen.UserId != null || chosen.BotProfileId != null
+                    || chosen.ReservedUserId != userId)
+                {
+                    return ConflictHost("The reserved seat is no longer available.");
+                }
+
+                chosen.UserId = userId;
+                chosen.ReservedUserId = null;
+                room.PreStartInvitations.Remove(pending.Key);
+                return new TeamMatchHostResult(
+                    TeamMatchLobbyStatus.Success, Lobby: View(room, userId));
             }
 
             var match = room.ReplacementInvitations.FirstOrDefault(pair =>
