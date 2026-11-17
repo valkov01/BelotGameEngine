@@ -105,6 +105,87 @@ namespace Belot.Engine.Tests.GameMechanics
         }
 
         [Fact]
+        public void TwoTablesKeepAllThirtyTwoCardsIdenticalDespiteDivergentAuctions()
+        {
+            var generator = new Deck(new Random(1206));
+            var boards = new Card[4][];
+            for (var i = 0; i < boards.Length; i++)
+            {
+                generator.Shuffle();
+                boards[i] = generator.CopyOrder();
+            }
+
+            BelotMatch Create() => new BelotMatch(new BelotMatchOptions
+            {
+                ManualRoundProgression = true,
+                FirstToPlay = PlayerPosition.West,
+                DealOrderProvider = round => boards[round - 1],
+            });
+
+            var passedTable = Create();
+            var playedTable = Create();
+            passedTable.Start();
+            playedTable.Start();
+
+            for (var board = 1; board <= 4; board++)
+            {
+                for (var p = 0; p < 4; p++)
+                {
+                    Assert.Equal(
+                        BelotActResult.Ok,
+                        passedTable.Act(passedTable.ToMove, BelotAction.Bid(BidType.Pass)));
+                }
+
+                // The second table plays a genuine full deal rather than passing out.
+                var safety = 0;
+                while (!playedTable.IsAwaitingRoundAdvance)
+                {
+                    Assert.True(++safety < 200, "A played deal failed to terminate.");
+                    var seat = playedTable.ToMove;
+                    var view = playedTable.GetView(seat);
+                    BelotAction move;
+                    if (view.Decision == BelotDecision.Bid)
+                    {
+                        move = BelotAction.Bid(view.Bids.Count == 0 ? BidType.AllTrumps : BidType.Pass);
+                    }
+                    else if (view.Decision == BelotDecision.Announce)
+                    {
+                        move = BelotAction.Declare(null);
+                    }
+                    else
+                    {
+                        move = BelotAction.PlayCard(view.PlayableCards[0]);
+                    }
+
+                    Assert.Equal(BelotActResult.Ok, playedTable.Act(seat, move));
+                }
+
+                Assert.Equal(board, passedTable.RoundsPlayed);
+                Assert.Equal(board, playedTable.RoundsPlayed);
+                if (board < 4)
+                {
+                    passedTable.AdvanceToNextRound();
+                    playedTable.AdvanceToNextRound();
+                }
+            }
+
+            passedTable.CompleteAfterRound();
+            playedTable.CompleteAfterRound();
+
+            for (var i = 0; i < 4; i++)
+            {
+                var passed = passedTable.GetRecord().Rounds[i];
+                var played = playedTable.GetRecord().Rounds[i];
+                Assert.Equal(boards[i], passed.Deal);
+                Assert.Equal(boards[i], played.Deal);
+                Assert.Equal(passed.FirstToPlay, played.FirstToPlay);
+                Assert.Equal(4, passed.Bids.Count);
+                Assert.Empty(passed.Tricks);
+                Assert.Equal(8, played.Tricks.Count);
+            }
+        }
+
+        [Fact]
         public void InvalidPredeterminedDealCannotStartAndMutatingInputCannotChangeStoredDeck()
         {
             var invalid = Card.AllCards.ToArray();
