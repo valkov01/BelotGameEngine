@@ -18,6 +18,7 @@ internal static class TeamMatchHostEndpoints
     {
         var group = endpoints.MapGroup("/api/team-matches").RequireAuthorization("Multiplayer");
         group.MapGet("/invitations", ListReplacementInvites);
+        group.MapGet("/{matchId}/notices", GetRemovalNotices);
         group.MapPost("/{matchId}/invitations/{invitationId}/accept", AcceptReplacement);
         group.MapGet("/{matchId}/organizer", GetOrganizer);
         group.MapPost("/{matchId}/reports", ReportInactive);
@@ -29,6 +30,11 @@ internal static class TeamMatchHostEndpoints
         group.MapPost("/{matchId}/game/bots/resume", ResumeBots);
         return group;
     }
+
+    private static IResult GetRemovalNotices(
+        string matchId, ClaimsPrincipal caller, TeamMatchLobbyService rooms) =>
+        Respond(rooms.GetRemovalNotices(matchId, UserId(caller)),
+            result => Results.Ok(result.Notices));
 
     private static IResult ListReplacementInvites(
         ClaimsPrincipal caller, TeamMatchLobbyService rooms) =>
