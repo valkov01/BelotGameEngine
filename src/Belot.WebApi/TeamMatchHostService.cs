@@ -54,7 +54,8 @@ internal sealed record TeamMatchHostResult(
     TeamMatchReplacementInvitationDto? Invitation = null,
     IReadOnlyList<TeamMatchReplacementInvitationDto>? Invitations = null,
     IReadOnlyList<TeamMatchRemovalNoticeDto>? Notices = null,
-    TeamMatchReportDto? Report = null);
+    TeamMatchReportDto? Report = null,
+    TeamMatchResultsView? Results = null);
 
 /// <summary>
 /// Host operations are synchronized under the same TeamMatchLobbyService gate
@@ -399,6 +400,25 @@ internal sealed partial class TeamMatchLobbyService
             this.ContinueAssignedBots(room, request.Table);
             return new TeamMatchHostResult(
                 TeamMatchLobbyStatus.Success, Lobby: View(room, userId));
+        }
+    }
+
+    /// <summary>Any current player can see only the server-approved Barometer projection.</summary>
+    public TeamMatchHostResult GetMemberResults(string matchId, string userId)
+    {
+        lock (this.gate)
+        {
+            var member = this.LookupMember(matchId, userId);
+            if (member.Status != TeamMatchLobbyStatus.Success)
+            {
+                return HostProblem(member);
+            }
+
+            var game = this.rooms[matchId].Game;
+            return game == null
+                ? ConflictHost("Match has not started.")
+                : new TeamMatchHostResult(
+                    TeamMatchLobbyStatus.Success, Results: game.GetComparedResults());
         }
     }
 
