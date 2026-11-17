@@ -1,0 +1,24 @@
+name: A10 Team Matches .NET checks
+
+on:
+  push:
+    branches: [a10-team-matches-core]
+  pull_request:
+    branches: [a02-multiplayer-foundation]
+
+permissions:
+  contents: read
+
+jobs:
+  a10-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Engine unit tests
+        run: dotnet test src/Tests/Belot.Engine.Tests/Belot.Engine.Tests.csproj --configuration Release --filter 'FullyQualifiedName~TeamMatchEngineTests'
+      - name: Two-table coordinator tests
+        run: dotnet test src/Tests/Belot.WebApi.Tests/Belot.WebApi.Tests.csproj --configuration Release --filter 'FullyQualifiedName~TeamMatchCoreCoordinatorTests'
