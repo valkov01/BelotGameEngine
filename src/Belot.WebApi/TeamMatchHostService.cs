@@ -18,8 +18,11 @@ public sealed record TeamMatchHumanActionRequest(
 public sealed record ResumeTeamMatchBotsRequest(int Table);
 
 public sealed record TeamMatchReportDto(
-    string ReportId, int Table, PlayerPosition Seat, PlayerPosition ReporterSeat,
+    string ReportId, int Table, PlayerPosition Seat, int ReporterTable, PlayerPosition ReporterSeat,
     string? Reason, DateTimeOffset CreatedAt);
+
+public sealed record TeamMatchRemovalNoticeDto(
+    string MatchId, int Table, PlayerPosition Seat, string Message, DateTimeOffset CreatedAt);
 
 public sealed record TeamMatchReplacementInvitationDto(
     string InvitationId, string MatchId, string MatchName,
@@ -50,6 +53,7 @@ internal sealed record TeamMatchHostResult(
     TeamMatchGameSnapshotDto? Game = null,
     TeamMatchReplacementInvitationDto? Invitation = null,
     IReadOnlyList<TeamMatchReplacementInvitationDto>? Invitations = null,
+    IReadOnlyList<TeamMatchRemovalNoticeDto>? Notices = null,
     TeamMatchReportDto? Report = null);
 
 /// <summary>
@@ -60,7 +64,7 @@ internal sealed record TeamMatchHostResult(
 internal sealed partial class TeamMatchLobbyService
 {
     private sealed record TeamMatchReportInternal(
-        string Id, string ReporterUserId, PlayerPosition ReporterSeat,
+        string Id, string ReporterUserId, int ReporterTable, PlayerPosition ReporterSeat,
         int Table, PlayerPosition Seat, string? Reason, DateTimeOffset At);
 
     private sealed record TeamMatchReplacementInvitationInternal(
@@ -69,6 +73,8 @@ internal sealed partial class TeamMatchLobbyService
     private sealed partial class RoomState
     {
         public List<TeamMatchReportInternal> InactivityReports { get; } = new();
+
+        public Dictionary<string, List<TeamMatchRemovalNoticeDto>> RemovalNotices { get; } = new(StringComparer.Ordinal);
 
         public Dictionary<(int Table, PlayerPosition Seat), TeamMatchReplacementInvitationInternal>
             ReplacementInvitations { get; } = new();
@@ -119,7 +125,7 @@ internal sealed partial class TeamMatchLobbyService
             }
 
             var record = new TeamMatchReportInternal(
-                NewSecret(12), userId, source.Position, request.Table, request.Seat,
+                NewSecret(12), userId, source.Table, source.Position, request.Table, request.Seat,
                 string.IsNullOrWhiteSpace(request.Reason) ? null : request.Reason.Trim(), now);
             room.InactivityReports.Add(record);
             return new TeamMatchHostResult(
@@ -201,7 +207,17 @@ internal sealed partial class TeamMatchLobbyService
 
             // Kicking revokes private access under the SAME lock used by every
             // Team Match action. Never silently create a bot.
+            var removedUserId = target.UserId;
             room.Actions!.RevokeForTrustedCoordinator(request.Table, request.Seat);
+            if (!room.RemovalNotices.TryGetValue(removedUserId, out var messages))
+            {
+                messages = new List<TeamMatchRemovalNoticeDto>();
+                room.RemovalNotices.Add(removedUserId, messages);
+            }
+
+            messages.Add(new TeamMatchRemovalNoticeDto(
+                room.Id, request.Table, request.Seat,
+                "Вие бяхте сменен от организатора на мача.", DateTimeOffset.UtcNow));
             target.UserId = null;
             target.ReservedUserId = null;
             target.BotProfileId = null;
@@ -210,6 +226,33 @@ internal sealed partial class TeamMatchLobbyService
             room.BotAutomationPending[request.Table] = false;
             return new TeamMatchHostResult(
                 TeamMatchLobbyStatus.Success, Lobby: View(room, userId));
+        }
+    }
+
+    /// <summary>
+    /// A kicked account can view ONLY its private removal notice, despite losing
+    /// the ability to query the lobby, its hand or the current match state.
+    /// </summary>
+    public TeamMatchHostResult GetRemovalNotices(string matchId, string userId)
+    {
+        lock (this.gate)
+        {
+            var room = this.Find(matchId);
+            if (room == null)
+            {
+                return new TeamMatchHostResult(TeamMatchLobbyStatus.NotFound);
+            }
+
+            if (room.RemovalNotices.TryGetValue(userId, out var messages))
+            {
+                return new TeamMatchHostResult(
+                    TeamMatchLobbyStatus.Success, Notices: messages.ToArray());
+            }
+
+            return IsMember(room, userId)
+                ? new TeamMatchHostResult(
+                    TeamMatchLobbyStatus.Success, Notices: Array.Empty<TeamMatchRemovalNoticeDto>())
+                : new TeamMatchHostResult(TeamMatchLobbyStatus.Forbidden);
         }
     }
 
@@ -551,7 +594,7 @@ internal sealed partial class TeamMatchLobbyService
             .ToDictionary(seat => seat.Position.ToString(), seat => seat.BotProfileId!);
 
     private static TeamMatchReportDto PublicReport(TeamMatchReportInternal report) =>
-        new(report.Id, report.Table, report.Seat, report.ReporterSeat, report.Reason, report.At);
+        new(report.Id, report.Table, report.Seat, report.ReporterTable, report.ReporterSeat, report.Reason, report.At);
 
     private static TeamMatchReplacementInvitationDto PublicInvite(
         RoomState room, TeamMatchReplacementInvitationInternal invite) =>
