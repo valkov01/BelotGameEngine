@@ -15,6 +15,8 @@ internal sealed class TeamMatchCoreCoordinator
 
     private readonly Deck canonicalDeck;
 
+    private readonly TeamMatchDealSchedule schedule;
+
     private readonly Dictionary<int, Card[]> canonicalBoards = new();
 
     private readonly BelotMatch[] tables;
@@ -24,13 +26,7 @@ internal sealed class TeamMatchCoreCoordinator
         int deckSeed,
         PlayerPosition firstBidder = PlayerPosition.South)
     {
-        if (scheduledDeals is < 4 or > 20)
-        {
-            throw new ArgumentOutOfRangeException(nameof(scheduledDeals), "Choose 4 to 20 scheduled deals.");
-        }
-
-        this.ScheduledDeals = scheduledDeals;
-        this.AllowedDeals = scheduledDeals;
+        this.schedule = new TeamMatchDealSchedule(scheduledDeals);
         this.canonicalDeck = new Deck(new Random(deckSeed));
 
         // Each table has its own deck, hands and score state. The provider returns
@@ -51,12 +47,12 @@ internal sealed class TeamMatchCoreCoordinator
     }
 
     /// <summary>Organizer-selected deal count: the minimum before hanging can extend the match.</summary>
-    public int ScheduledDeals { get; }
+    public int ScheduledDeals => this.schedule.ScheduledDeals;
 
     /// <summary>Current shared last scheduled board, extended one at a time when hanging remains.</summary>
-    public int AllowedDeals { get; private set; }
+    public int AllowedDeals => this.schedule.AllowedDeals;
 
-    public bool IsFinished { get; private set; }
+    public bool IsFinished => this.schedule.IsFinished;
 
     public int GetRoundsPlayed(int table)
     {
@@ -171,20 +167,20 @@ internal sealed class TeamMatchCoreCoordinator
             }
         }
 
-        // Tables do not wait for each other during the normal 4..20 scheduled
-        // deals. At the last currently allowed board BOTH must finish before
-        // the shared extension decision can be made.
-        if (this.tables.Any(table =>
-                !table.IsAwaitingRoundAdvance || table.RoundsPlayed != this.AllowedDeals))
+        // Only both completed tables may settle the shared boundary.
+        // The schedule handles arbitrarily many identical extension deals.
+        if (!this.tables.All(table => table.IsAwaitingRoundAdvance))
         {
             return;
         }
 
-        if (this.tables.Any(table => table.HangingPoints > 0))
+        var decision = this.schedule.Resolve(
+            this.tables[0].RoundsPlayed,
+            this.tables[1].RoundsPlayed,
+            this.tables[0].HangingPoints,
+            this.tables[1].HangingPoints);
+        if (decision == TeamMatchBoundaryDecision.Extend)
         {
-            // The confirmed A10 rule: even if only one table has hanging points,
-            // BOTH receive a fresh identical numbered deal. Repeat as needed.
-            this.AllowedDeals++;
             foreach (var table in this.tables)
             {
                 table.AdvanceToNextRound();
@@ -193,11 +189,12 @@ internal sealed class TeamMatchCoreCoordinator
             return;
         }
 
-        foreach (var table in this.tables)
+        if (decision == TeamMatchBoundaryDecision.Complete)
         {
-            table.CompleteAfterRound();
+            foreach (var table in this.tables)
+            {
+                table.CompleteAfterRound();
+            }
         }
-
-        this.IsFinished = true;
     }
 }
