@@ -177,6 +177,69 @@ internal sealed class TeamMatchSeatActionBoundary
         }
     }
 
+    /// <summary>
+    /// Organizer-approved, fixed-seat human handoff. Caller must hold the parent
+    /// lobby's gate and verify host authority, actor uniqueness and invitation.
+    /// Revoked users cannot see the remaining hand or submit another action.
+    /// </summary>
+    internal void AssignForTrustedCoordinator(int table, PlayerPosition seat, string userId)
+    {
+        if (!ValidSeat(table, seat) || string.IsNullOrWhiteSpace(userId))
+        {
+            throw new ArgumentException("A valid seat and authenticated controller are required.");
+        }
+
+        lock (this.gate)
+        {
+            if (this.humanSeats.ContainsKey((table, seat))
+                || this.humanSeats.Values.Contains(userId, StringComparer.Ordinal))
+            {
+                throw new InvalidOperationException("The controller already occupies a seat.");
+            }
+
+            this.humanSeats.Add((table, seat), userId);
+            this.tableRevisions[table]++;
+        }
+    }
+
+    /// <summary>
+    /// Trusted explicit bot action; the surrounding lobby must first prove this
+    /// exact seat currently has an ORGANIZER-ASSIGNED bot (never automatic fill).
+    /// Bot and human actions use the same game/revision serialization lock.
+    /// </summary>
+    internal BelotActResult SubmitBotForTrustedCoordinator(
+        int table, PlayerPosition seat, BelotAction action)
+    {
+        if (!ValidSeat(table, seat))
+        {
+            throw new ArgumentOutOfRangeException(nameof(seat));
+        }
+
+        lock (this.gate)
+        {
+            if (this.humanSeats.ContainsKey((table, seat)))
+            {
+                throw new InvalidOperationException("A human controls the selected bot seat.");
+            }
+
+            var other = table == 1 ? 2 : 1;
+            var before = this.game.GetSeatView(other, PlayerPosition.South);
+            var result = this.game.Act(table, seat, action);
+            if (result == BelotActResult.Ok)
+            {
+                this.tableRevisions[table]++;
+                var after = this.game.GetSeatView(other, PlayerPosition.South);
+                if (before.RoundNumber != after.RoundNumber
+                    || before.IsMatchFinished != after.IsMatchFinished)
+                {
+                    this.tableRevisions[other]++;
+                }
+            }
+
+            return result;
+        }
+    }
+
     private bool IsAuthorized(string userId, int table, PlayerPosition seat) =>
         ValidSeat(table, seat)
         && !string.IsNullOrWhiteSpace(userId)

@@ -87,7 +87,7 @@ internal sealed record TeamMatchLobbyResult(
 /// All admission, host, seat, reserve and start mutations are serialized together.
 /// The private code is stored only as a hash; it never appears in a GET/seat DTO.
 /// </summary>
-internal sealed class TeamMatchLobbyService
+internal sealed partial class TeamMatchLobbyService
 {
     private static readonly PlayerPosition[] CompassSeats =
     {
@@ -112,7 +112,7 @@ internal sealed class TeamMatchLobbyService
         public string? BotProfileId { get; set; }
     }
 
-    private sealed class RoomState
+    private sealed partial class RoomState
     {
         public required string Id { get; init; }
 
@@ -425,6 +425,8 @@ internal sealed class TeamMatchLobbyService
                 .ToArray();
             match.Actions = new TeamMatchSeatActionBoundary(game, humanSeats);
             match.Game = game;
+            this.ContinueAssignedBots(match, 1);
+            this.ContinueAssignedBots(match, 2);
             return new TeamMatchLobbyResult(TeamMatchLobbyStatus.Success, View(match, callerUserId));
         }
     }
