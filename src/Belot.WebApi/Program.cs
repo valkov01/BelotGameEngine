@@ -169,6 +169,7 @@ app.MapGet("/api/health", () => Results.Ok(new HealthResponse("ok")));
 app.MapGet("/api/bots", () => Results.Ok(BotProfiles.All));
 app.MapMultiplayerRoomEndpoints();
 app.MapTeamMatchLobbyEndpoints();
+app.MapTeamMatchHostEndpoints();
 app.MapHub<MultiplayerRealtimeHub>("/hubs/multiplayer", options =>
 {
     options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
