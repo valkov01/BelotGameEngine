@@ -19,6 +19,10 @@ internal sealed class TeamMatchCoreCoordinator
 
     private readonly TeamMatchDealSchedule schedule;
 
+    private readonly TeamMatchComparisonTracker comparisons = new();
+
+    private readonly bool barometerEnabled;
+
     private readonly Dictionary<int, Card[]> canonicalBoards = new();
 
     private readonly BelotMatch[] tables;
@@ -29,8 +33,9 @@ internal sealed class TeamMatchCoreCoordinator
     /// </summary>
     public TeamMatchCoreCoordinator(
         int scheduledDeals,
-        PlayerPosition firstBidder = PlayerPosition.South)
-        : this(scheduledDeals, null, firstBidder)
+        PlayerPosition firstBidder = PlayerPosition.South,
+        bool barometerEnabled = true)
+        : this(scheduledDeals, null, firstBidder, barometerEnabled)
     {
     }
 
@@ -41,17 +46,20 @@ internal sealed class TeamMatchCoreCoordinator
     internal TeamMatchCoreCoordinator(
         int scheduledDeals,
         int deckSeed,
-        PlayerPosition firstBidder = PlayerPosition.South)
-        : this(scheduledDeals, (int?)deckSeed, firstBidder)
+        PlayerPosition firstBidder = PlayerPosition.South,
+        bool barometerEnabled = true)
+        : this(scheduledDeals, (int?)deckSeed, firstBidder, barometerEnabled)
     {
     }
 
     private TeamMatchCoreCoordinator(
         int scheduledDeals,
         int? deterministicDeckSeed,
-        PlayerPosition firstBidder)
+        PlayerPosition firstBidder,
+        bool barometerEnabled)
     {
         this.schedule = new TeamMatchDealSchedule(scheduledDeals);
+        this.barometerEnabled = barometerEnabled;
         if (deterministicDeckSeed.HasValue)
         {
             this.deterministicDeck = new Deck(new Random(deterministicDeckSeed.Value));
@@ -81,6 +89,20 @@ internal sealed class TeamMatchCoreCoordinator
     public int AllowedDeals => this.schedule.AllowedDeals;
 
     public bool IsFinished => this.schedule.IsFinished;
+
+    /// <summary>
+    /// Public-data-only comparison projection. Future REST/SignalR handlers MUST
+    /// authenticate match membership first; the coordinator itself is internal.
+    /// Barometer OFF hides all comparative results until the actual match ends.
+    /// </summary>
+    internal TeamMatchResultsView GetComparedResults()
+    {
+        lock (this.gate)
+        {
+            return this.comparisons.Project(
+                this.barometerEnabled, this.IsFinished, this.ScheduledDeals);
+        }
+    }
 
     public int GetRoundsPlayed(int table)
     {
@@ -141,6 +163,7 @@ internal sealed class TeamMatchCoreCoordinator
             if (result == BelotActResult.Ok)
             {
                 this.ProcessCompletedRounds();
+                this.CapturePairedCompletedDeals();
             }
 
             return result;
@@ -199,6 +222,41 @@ internal sealed class TeamMatchCoreCoordinator
             }
 
             return this.canonicalBoards[roundNumber];
+        }
+    }
+
+    /// <summary>
+    /// Pair only the same completed deal index at both tables, never by finish
+    /// order or current active board. BelotSeatView.PreviousRounds contains the
+    /// C# engine's scored PUBLIC summaries (not raw trick points or secret hands).
+    /// Capture while holding the coordinator lock, once per numbered deal.
+    /// </summary>
+    private void CapturePairedCompletedDeals()
+    {
+        var pairedReady = Math.Min(this.tables[0].RoundsPlayed, this.tables[1].RoundsPlayed);
+        if (pairedReady <= this.comparisons.PairedDealCount)
+        {
+            return;
+        }
+
+        var table1 = this.tables[0].GetView(PlayerPosition.South).PreviousRounds;
+        var table2 = this.tables[1].GetView(PlayerPosition.South).PreviousRounds;
+        for (var dealNumber = this.comparisons.PairedDealCount + 1;
+             dealNumber <= pairedReady;
+             dealNumber++)
+        {
+            var index = dealNumber - 1;
+            if (table1.Count <= index || table2.Count <= index)
+            {
+                throw new InvalidOperationException("Cannot compare a deal without both authoritative engine scores.");
+            }
+
+            var one = table1[index];
+            var two = table2[index];
+            this.comparisons.RecordPair(
+                dealNumber,
+                new TeamMatchTableDealPoints(one.SouthNorthPoints, one.EastWestPoints),
+                new TeamMatchTableDealPoints(two.SouthNorthPoints, two.EastWestPoints));
         }
     }
 
