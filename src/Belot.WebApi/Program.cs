@@ -149,6 +149,7 @@ builder.Services.AddSingleton<MultiplayerRoomService>();
 builder.Services.AddSingleton<IRoomMembershipService>(services => services.GetRequiredService<MultiplayerRoomService>());
 builder.Services.AddSingleton<ISeatAssignmentService>(services => services.GetRequiredService<MultiplayerRoomService>());
 builder.Services.AddSingleton<IMultiplayerGameService, MultiplayerGameService>();
+builder.Services.AddSingleton<TeamMatchLobbyService>();
 
 var app = builder.Build();
 
@@ -167,6 +168,7 @@ app.UseStaticFiles();
 app.MapGet("/api/health", () => Results.Ok(new HealthResponse("ok")));
 app.MapGet("/api/bots", () => Results.Ok(BotProfiles.All));
 app.MapMultiplayerRoomEndpoints();
+app.MapTeamMatchLobbyEndpoints();
 app.MapHub<MultiplayerRealtimeHub>("/hubs/multiplayer", options =>
 {
     options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
