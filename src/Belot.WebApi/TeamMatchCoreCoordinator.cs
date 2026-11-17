@@ -1,5 +1,7 @@
 namespace Belot.WebApi;
 
+using System.Security.Cryptography;
+
 using Belot.Engine.Cards;
 using Belot.Engine.GameMechanics;
 using Belot.Engine.Players;
@@ -13,7 +15,7 @@ internal sealed class TeamMatchCoreCoordinator
 {
     private readonly object gate = new();
 
-    private readonly Deck canonicalDeck;
+    private readonly Deck? deterministicDeck;
 
     private readonly TeamMatchDealSchedule schedule;
 
@@ -21,13 +23,39 @@ internal sealed class TeamMatchCoreCoordinator
 
     private readonly BelotMatch[] tables;
 
+    /// <summary>
+    /// Production default: secure, unpredictable canonical deal permutations.
+    /// Neither the shuffle RNG nor the full deals may be exposed in public views.
+    /// </summary>
     public TeamMatchCoreCoordinator(
+        int scheduledDeals,
+        PlayerPosition firstBidder = PlayerPosition.South)
+        : this(scheduledDeals, null, firstBidder)
+    {
+    }
+
+    /// <summary>
+    /// Deterministic mode for reproducible unit tests only; do not accept this seed
+    /// from a user or reuse this overload for public Team Matches.
+    /// </summary>
+    internal TeamMatchCoreCoordinator(
         int scheduledDeals,
         int deckSeed,
         PlayerPosition firstBidder = PlayerPosition.South)
+        : this(scheduledDeals, (int?)deckSeed, firstBidder)
+    {
+    }
+
+    private TeamMatchCoreCoordinator(
+        int scheduledDeals,
+        int? deterministicDeckSeed,
+        PlayerPosition firstBidder)
     {
         this.schedule = new TeamMatchDealSchedule(scheduledDeals);
-        this.canonicalDeck = new Deck(new Random(deckSeed));
+        if (deterministicDeckSeed.HasValue)
+        {
+            this.deterministicDeck = new Deck(new Random(deterministicDeckSeed.Value));
+        }
 
         // Each table has its own deck, hands and score state. The provider returns
         // the same immutable numbered distribution for every absolute compass seat.
@@ -149,8 +177,25 @@ internal sealed class TeamMatchCoreCoordinator
             // is kept server-side, never returned from a public HTTP endpoint.
             while (this.canonicalBoards.Count < roundNumber)
             {
-                this.canonicalDeck.Shuffle();
-                this.canonicalBoards.Add(this.canonicalBoards.Count + 1, this.canonicalDeck.CopyOrder());
+                Card[] board;
+                if (this.deterministicDeck != null)
+                {
+                    this.deterministicDeck.Shuffle();
+                    board = this.deterministicDeck.CopyOrder();
+                }
+                else
+                {
+                    board = Card.AllCards.ToArray();
+                    // Unbiased Fisher-Yates, using a cryptographically secure source.
+                    // Never derive public tournament deals from a 32-bit test seed.
+                    for (var i = board.Length - 1; i > 0; i--)
+                    {
+                        var j = RandomNumberGenerator.GetInt32(i + 1);
+                        (board[i], board[j]) = (board[j], board[i]);
+                    }
+                }
+
+                this.canonicalBoards.Add(this.canonicalBoards.Count + 1, board);
             }
 
             return this.canonicalBoards[roundNumber];
