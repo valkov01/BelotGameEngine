@@ -189,7 +189,9 @@ public sealed class TeamMatchHostIntegrationTests : IDisposable
 
         // Actually execute the auction and at least one PLAYED CARD; this is
         // not just a pre-auction handover test.
-        while (state.State.Hand.Count >= 8 && guard++ < 20)
+        while ((state.State.Tricks.Sum(trick => trick.Cards.Count)
+            + state.State.CurrentTrick.Count == 0 || state.State.Hand.Count >= 8)
+            && guard++ < 20)
         {
             GameActionRequest move = state.State.Decision switch
             {
