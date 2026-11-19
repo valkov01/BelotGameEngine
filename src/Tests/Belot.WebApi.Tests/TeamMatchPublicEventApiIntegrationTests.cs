@@ -187,6 +187,134 @@ public sealed class TeamMatchPublicEventApiIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task HybridLimitsAndCursorReplayWorkForEightPlayersSharingOneIp()
+    {
+        const string ipAddress = "198.51.100.120";
+        using var hybridFactory = new ApiFactory(
+            useProductionRateLimit: true,
+            hybridRateLimitEnabled: true,
+            hybridIpPermitLimit: 300,
+            hybridReadPermitLimit: 17,
+            hybridMutationPermitLimit: 20,
+            hybridPerUserConcurrencyLimit: 4,
+            hybridAggregateConcurrencyLimit: 32);
+        using var hybridClient = hybridFactory.CreateClient();
+        var members = Enumerable.Range(0, 8)
+            .Select(_ => Guid.NewGuid().ToString())
+            .ToArray();
+        var seats = new[]
+        {
+            (1, PlayerPosition.South),
+            (1, PlayerPosition.East),
+            (1, PlayerPosition.North),
+            (1, PlayerPosition.West),
+            (2, PlayerPosition.South),
+            (2, PlayerPosition.East),
+            (2, PlayerPosition.North),
+            (2, PlayerPosition.West),
+        };
+
+        using var creation = await this.SendAsync(
+            HttpMethod.Post,
+            "/api/team-matches",
+            members[0],
+            new { scheduledDeals = 4, barometerEnabled = true },
+            hybridClient,
+            ipAddress);
+        Assert.Equal(HttpStatusCode.Created, creation.StatusCode);
+        var setup = (await creation.Content.ReadFromJsonAsync<CreateTeamMatchResponse>(JsonOptions))!;
+        var root = "/api/team-matches/" + setup.Lobby.MatchId;
+
+        for (var index = 1; index < members.Length; index++)
+        {
+            using var joined = await this.SendAsync(
+                HttpMethod.Post,
+                root + "/join",
+                members[index],
+                new
+                {
+                    invitationCode = setup.InvitationCode,
+                    table = seats[index].Item1,
+                    seat = seats[index].Item2,
+                },
+                hybridClient,
+                ipAddress);
+            Assert.Equal(HttpStatusCode.OK, joined.StatusCode);
+        }
+
+        using var started = await this.SendAsync(
+            HttpMethod.Post,
+            root + "/start",
+            members[0],
+            client: hybridClient,
+            ipAddress: ipAddress);
+        Assert.Equal(HttpStatusCode.OK, started.StatusCode);
+
+        TeamMatchGameSnapshotDto? hostSnapshot = null;
+        for (var memberIndex = 0; memberIndex < members.Length; memberIndex++)
+        {
+            for (var poll = 0; poll < 16; poll++)
+            {
+                using var response = await this.SendAsync(
+                    HttpMethod.Get,
+                    root + "/game?afterSequence=-1",
+                    members[memberIndex],
+                    client: hybridClient,
+                    ipAddress: ipAddress);
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                var snapshot =
+                    (await response.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
+                Assert.Equal(seats[memberIndex].Item1, snapshot.Table);
+                Assert.Equal(seats[memberIndex].Item2, snapshot.YourSeat);
+                Assert.Equal(5, snapshot.State.Hand.Count);
+                if (memberIndex == 0)
+                {
+                    hostSnapshot = snapshot;
+                }
+            }
+        }
+
+        Assert.NotNull(hostSnapshot);
+        using var actionResponse = await this.SendAsync(
+            HttpMethod.Post,
+            root + "/game/actions",
+            members[0],
+            new TeamMatchHumanActionRequest(
+                hostSnapshot.Revision,
+                "hybrid-cursor-action",
+                new GameActionRequest { Bid = "Pass" },
+                hostSnapshot.LastEventSequence),
+            hybridClient,
+            ipAddress);
+        Assert.Equal(HttpStatusCode.OK, actionResponse.StatusCode);
+        var accepted =
+            (await actionResponse.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
+        Assert.NotEmpty(accepted.Events);
+        Assert.Equal(
+            Enumerable.Range(accepted.Events[0].Sequence, accepted.Events.Count),
+            accepted.Events.Select(gameEvent => gameEvent.Sequence));
+        var eventsJson = JsonSerializer.Serialize(accepted.Events);
+        Assert.DoesNotContain("hand", eventsJson, StringComparison.OrdinalIgnoreCase);
+        foreach (var member in members)
+        {
+            Assert.DoesNotContain(member, eventsJson, StringComparison.Ordinal);
+        }
+
+        using var replay = await this.SendAsync(
+            HttpMethod.Get,
+            root + "/game?afterSequence=" + hostSnapshot.LastEventSequence,
+            members[0],
+            client: hybridClient,
+            ipAddress: ipAddress);
+        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+        var replayed =
+            (await replay.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
+        Assert.Equal(accepted.LastEventSequence, replayed.LastEventSequence);
+        Assert.Equal(accepted.Events.Select(gameEvent => gameEvent.Sequence),
+            replayed.Events.Select(gameEvent => gameEvent.Sequence));
+    }
+
+    [Fact]
     public async Task InitialBotActionsAreAvailableToTheCurrentTableMember()
     {
         var host = Guid.NewGuid().ToString();
@@ -306,7 +434,8 @@ public sealed class TeamMatchPublicEventApiIntegrationTests : IDisposable
         string path,
         string user,
         object? body = null,
-        HttpClient? client = null)
+        HttpClient? client = null,
+        string? ipAddress = null)
     {
         using var request = ApiFactory.CreateAuthenticatedRequest(
             method,
@@ -315,6 +444,11 @@ public sealed class TeamMatchPublicEventApiIntegrationTests : IDisposable
         if (body != null)
         {
             request.Content = JsonContent.Create(body, options: JsonOptions);
+        }
+
+        if (ipAddress != null)
+        {
+            request.Headers.Add("X-Test-Client-Ip", ipAddress);
         }
 
         return await (client ?? this.client).SendAsync(request);
