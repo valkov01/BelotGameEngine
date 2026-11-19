@@ -17,18 +17,30 @@ internal static class TeamMatchHostEndpoints
     internal static RouteGroupBuilder MapTeamMatchHostEndpoints(this IEndpointRouteBuilder endpoints)
     {
         var group = endpoints.MapGroup("/api/team-matches").RequireAuthorization("Multiplayer");
-        group.MapGet("/invitations", ListReplacementInvites);
-        group.MapGet("/{matchId}/notices", GetRemovalNotices);
-        group.MapPost("/{matchId}/invitations/{invitationId}/accept", AcceptReplacement);
-        group.MapGet("/{matchId}/organizer", GetOrganizer);
-        group.MapGet("/{matchId}/results", GetResults);
-        group.MapPost("/{matchId}/reports", ReportInactive);
-        group.MapPost("/{matchId}/organizer/kick", Kick);
-        group.MapPost("/{matchId}/organizer/invite-replacement", InviteReplacement);
-        group.MapPost("/{matchId}/organizer/assign-replacement-bot", AssignReplacementBot);
-        group.MapGet("/{matchId}/game", GetGame);
-        group.MapPost("/{matchId}/game/actions", SubmitAction);
-        group.MapPost("/{matchId}/game/bots/resume", ResumeBots);
+        group.MapGet("/invitations", ListReplacementInvites)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Read));
+        group.MapGet("/{matchId}/notices", GetRemovalNotices)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Read));
+        group.MapPost("/{matchId}/invitations/{invitationId}/accept", AcceptReplacement)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
+        group.MapGet("/{matchId}/organizer", GetOrganizer)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Read));
+        group.MapGet("/{matchId}/results", GetResults)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Read));
+        group.MapPost("/{matchId}/reports", ReportInactive)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
+        group.MapPost("/{matchId}/organizer/kick", Kick)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
+        group.MapPost("/{matchId}/organizer/invite-replacement", InviteReplacement)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
+        group.MapPost("/{matchId}/organizer/assign-replacement-bot", AssignReplacementBot)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
+        group.MapGet("/{matchId}/game", GetGame)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Read));
+        group.MapPost("/{matchId}/game/actions", SubmitAction)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
+        group.MapPost("/{matchId}/game/bots/resume", ResumeBots)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
         return group;
     }
 

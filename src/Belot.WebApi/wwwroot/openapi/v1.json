@@ -641,7 +641,7 @@
     },
     "responses": {
       "RateLimited": {
-        "description": "The per-IP request limit has been reached. The API returns an empty 429 response."
+        "description": "A configured application rate-limit policy has been reached. The response includes safe X-Belot rate-limit headers and Retry-After."
       },
       "Unavailable": {
         "description": "The API cannot create a game because its active-game capacity has been reached. The response has no body."

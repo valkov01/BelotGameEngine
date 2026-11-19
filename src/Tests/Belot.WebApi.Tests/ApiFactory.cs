@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading.RateLimiting;
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -55,6 +56,20 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     private readonly IProfileDisplayNameProvider? profileDisplayNameProvider;
 
+    private readonly bool useProductionRateLimit;
+
+    private readonly bool hybridRateLimitEnabled;
+
+    private readonly int hybridIpPermitLimit;
+
+    private readonly int hybridReadPermitLimit;
+
+    private readonly int hybridMutationPermitLimit;
+
+    private readonly int hybridPerUserConcurrencyLimit;
+
+    private readonly int hybridAggregateConcurrencyLimit;
+
     public ApiFactory(
         bool revealHandsEnabled = false,
         string? debugAccessKey = null,
@@ -65,7 +80,14 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         int? realtimeEventsPerLobby = null,
         bool failRealtimeGameDelivery = false,
         string? corsAllowedOrigin = null,
-        IProfileDisplayNameProvider? profileDisplayNameProvider = null)
+        IProfileDisplayNameProvider? profileDisplayNameProvider = null,
+        bool useProductionRateLimit = false,
+        bool hybridRateLimitEnabled = false,
+        int hybridIpPermitLimit = 600,
+        int hybridReadPermitLimit = 90,
+        int hybridMutationPermitLimit = 20,
+        int hybridPerUserConcurrencyLimit = 4,
+        int hybridAggregateConcurrencyLimit = 32)
     {
         this.revealHandsEnabled = revealHandsEnabled;
         this.debugAccessKey = debugAccessKey;
@@ -77,6 +99,13 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         this.failRealtimeGameDelivery = failRealtimeGameDelivery;
         this.corsAllowedOrigin = corsAllowedOrigin;
         this.profileDisplayNameProvider = profileDisplayNameProvider;
+        this.useProductionRateLimit = useProductionRateLimit;
+        this.hybridRateLimitEnabled = hybridRateLimitEnabled;
+        this.hybridIpPermitLimit = hybridIpPermitLimit;
+        this.hybridReadPermitLimit = hybridReadPermitLimit;
+        this.hybridMutationPermitLimit = hybridMutationPermitLimit;
+        this.hybridPerUserConcurrencyLimit = hybridPerUserConcurrencyLimit;
+        this.hybridAggregateConcurrencyLimit = hybridAggregateConcurrencyLimit;
     }
 
     public Action<string>? LobbyLockWaiting { get; set; }
@@ -124,7 +153,6 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         {
             var settings = new Dictionary<string, string?>
             {
-                ["RateLimit:PermitLimit"] = "10000",
                 ["Debug:RevealHandsEnabled"] = this.revealHandsEnabled.ToString(),
                 ["Debug:AccessKey"] = this.debugAccessKey,
                 ["Authentication:Supabase:Issuer"] = TestIssuer,
@@ -133,7 +161,18 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 ["Multiplayer:PostgresConnectionString"] = this.multiplayerConnectionString,
                 ["Multiplayer:Realtime:EventsPerGame"] = this.realtimeEventsPerGame?.ToString(),
                 ["Multiplayer:Realtime:EventsPerLobby"] = this.realtimeEventsPerLobby?.ToString(),
+                ["RateLimit:Hybrid:Enabled"] = this.hybridRateLimitEnabled.ToString(),
+                ["RateLimit:Hybrid:IpPermitLimit"] = this.hybridIpPermitLimit.ToString(),
+                ["RateLimit:Hybrid:TeamMatchReadPermitLimit"] = this.hybridReadPermitLimit.ToString(),
+                ["RateLimit:Hybrid:TeamMatchMutationPermitLimit"] = this.hybridMutationPermitLimit.ToString(),
+                ["RateLimit:Hybrid:PerUserConcurrencyLimit"] = this.hybridPerUserConcurrencyLimit.ToString(),
+                ["RateLimit:Hybrid:AggregateConcurrencyLimit"] = this.hybridAggregateConcurrencyLimit.ToString(),
             };
+            if (!this.useProductionRateLimit)
+            {
+                settings["RateLimit:PermitLimit"] = "10000";
+            }
+
             if (this.corsAllowedOrigin is not null)
             {
                 settings["Cors:AllowedOrigins:0"] = this.corsAllowedOrigin;
@@ -144,19 +183,23 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
         builder.ConfigureTestServices(services =>
         {
-            services.PostConfigure<RateLimiterOptions>(options =>
+            services.AddSingleton<IStartupFilter, TestClientIpStartupFilter>();
+            if (!this.useProductionRateLimit)
             {
-                options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
-                    RateLimitPartition.GetFixedWindowLimiter(
-                        context.Connection.RemoteIpAddress?.ToString() ?? "test",
-                        _ => new FixedWindowRateLimiterOptions
-                        {
-                            PermitLimit = 100000,
-                            Window = TimeSpan.FromMinutes(1),
-                            QueueLimit = 0,
-                            AutoReplenishment = true,
-                        }));
-            });
+                services.PostConfigure<RateLimiterOptions>(options =>
+                {
+                    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+                        RateLimitPartition.GetFixedWindowLimiter(
+                            context.Connection.RemoteIpAddress?.ToString() ?? "test",
+                            _ => new FixedWindowRateLimiterOptions
+                            {
+                                PermitLimit = 100000,
+                                Window = TimeSpan.FromMinutes(1),
+                                QueueLimit = 0,
+                                AutoReplenishment = true,
+                            }));
+                });
+            }
 
             services.PostConfigure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
             {
@@ -192,6 +235,25 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 services.AddSingleton(this.profileDisplayNameProvider);
             }
         });
+    }
+
+    private sealed class TestClientIpStartupFilter : IStartupFilter
+    {
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) =>
+            app =>
+            {
+                app.Use(async (context, continuation) =>
+                {
+                    if (context.Request.Headers.TryGetValue("X-Test-Client-Ip", out var address)
+                        && System.Net.IPAddress.TryParse(address.ToString(), out var parsed))
+                    {
+                        context.Connection.RemoteIpAddress = parsed;
+                    }
+
+                    await continuation(context);
+                });
+                next(app);
+            };
     }
 
     private sealed class TestRealtimePublisher : IMultiplayerRealtimePublisher

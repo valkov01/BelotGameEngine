@@ -100,6 +100,20 @@ builder.Services.AddCors(options =>
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = (context, _) =>
+    {
+        var retryAfter = context.Lease.TryGetMetadata(
+            System.Threading.RateLimiting.MetadataName.RetryAfter,
+            out var value)
+                ? value
+                : TimeSpan.FromSeconds(rateWindowSeconds);
+        return new ValueTask(RateLimitDiagnostics.RejectAsync(
+            context.HttpContext,
+            "legacy-ip",
+            RateLimitDiagnostics.HashPartition(
+                context.HttpContext.Connection.RemoteIpAddress?.ToString()),
+            retryAfter));
+    };
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
         RateLimitPartition.GetFixedWindowLimiter(
             context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
@@ -111,6 +125,7 @@ builder.Services.AddRateLimiter(options =>
                 AutoReplenishment = true,
             }));
 });
+builder.Services.AddSingleton<HybridRateLimiter>();
 
 builder.Services.AddSingleton<GameStore>();
 builder.Services.AddSingleton<GameService>();
@@ -159,10 +174,20 @@ if (string.IsNullOrWhiteSpace(postgresConnectionString))
 }
 
 app.UseRouting();
+bool HybridRateLimitEnabled() =>
+    app.Configuration.GetValue("RateLimit:Hybrid:Enabled", false);
+app.UseWhen(
+    _ => HybridRateLimitEnabled(),
+    branch => branch.UseMiddleware<HybridIpRateLimitMiddleware>());
 app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
-app.UseRateLimiter();
+app.UseWhen(
+    _ => HybridRateLimitEnabled(),
+    branch => branch.UseMiddleware<TeamMatchRateLimitMiddleware>());
+app.UseWhen(
+    _ => !HybridRateLimitEnabled(),
+    branch => branch.UseRateLimiter());
 app.UseStaticFiles();
 
 app.MapGet("/api/health", () => Results.Ok(new HealthResponse("ok")));
