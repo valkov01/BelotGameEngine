@@ -38,6 +38,8 @@ internal sealed class TeamMatchSeatActionBoundary
 
     private readonly Dictionary<(int Table, PlayerPosition Seat), string> humanSeats = new();
 
+    private readonly Dictionary<int, TeamMatchPublicEventJournal> publicEvents;
+
     private readonly Dictionary<int, long> tableRevisions = new()
     {
         [1] = 0,
@@ -46,7 +48,10 @@ internal sealed class TeamMatchSeatActionBoundary
 
     private readonly HashSet<(int Table, PlayerPosition Seat, string UserId, string CommandId)> appliedCommands = new();
 
-    public TeamMatchSeatActionBoundary(TeamMatchCoreCoordinator game, IEnumerable<TeamMatchHumanSeat> humans)
+    public TeamMatchSeatActionBoundary(
+        TeamMatchCoreCoordinator game,
+        IEnumerable<TeamMatchHumanSeat> humans,
+        int publicEventCapacity = 512)
     {
         this.game = game ?? throw new ArgumentNullException(nameof(game));
         if (humans == null)
@@ -70,6 +75,12 @@ internal sealed class TeamMatchSeatActionBoundary
                 throw new ArgumentException("One human account may occupy exactly one unique Team Match seat.", nameof(humans));
             }
         }
+
+        this.publicEvents = new Dictionary<int, TeamMatchPublicEventJournal>
+        {
+            [1] = new TeamMatchPublicEventJournal(publicEventCapacity),
+            [2] = new TeamMatchPublicEventJournal(publicEventCapacity),
+        };
     }
 
     /// <summary>Returns a private view only to that seat's current authenticated human controller.</summary>
@@ -90,6 +101,43 @@ internal sealed class TeamMatchSeatActionBoundary
             return this.IsAuthorized(authenticatedUserId, table, seat)
                 ? this.tableRevisions[table]
                 : null;
+        }
+    }
+
+    public TeamMatchPublicEventReplay? GetPublicEventsAfter(
+        string authenticatedUserId,
+        int table,
+        PlayerPosition seat,
+        int afterSequence)
+    {
+        lock (this.gate)
+        {
+            return this.IsAuthorized(authenticatedUserId, table, seat)
+                ? this.publicEvents[table].GetEventsAfter(afterSequence)
+                : null;
+        }
+    }
+
+    public int? GetLastEventSequence(string authenticatedUserId, int table, PlayerPosition seat)
+    {
+        lock (this.gate)
+        {
+            return this.IsAuthorized(authenticatedUserId, table, seat)
+                ? this.publicEvents[table].LastEventSequence
+                : null;
+        }
+    }
+
+    public bool IsDuplicateCommand(
+        string authenticatedUserId,
+        int table,
+        PlayerPosition seat,
+        string commandId)
+    {
+        lock (this.gate)
+        {
+            return this.IsAuthorized(authenticatedUserId, table, seat)
+                && this.appliedCommands.Contains((table, seat, authenticatedUserId, commandId));
         }
     }
 
@@ -131,6 +179,7 @@ internal sealed class TeamMatchSeatActionBoundary
                     TeamMatchSeatActionStatus.StaleRevision, this.tableRevisions[table]);
             }
 
+            var before = this.game.GetSeatView(table, seat);
             var other = table == 1 ? 2 : 1;
             var beforeOther = this.game.GetSeatView(other, PlayerPosition.South);
             var result = this.game.Act(table, seat, action);
@@ -142,6 +191,13 @@ internal sealed class TeamMatchSeatActionBoundary
 
             this.appliedCommands.Add(command);
             this.tableRevisions[table]++;
+            var after = this.game.GetSeatView(table, seat);
+            this.publicEvents[table].Append(GameEventProjector.Project(
+                before,
+                after,
+                seat,
+                action,
+                this.publicEvents[table].NextSequence));
 
             // When the last paired deal completes, the coordinator can start
             // an extra board (or end the match) at BOTH tables. Invalidate any
@@ -151,6 +207,10 @@ internal sealed class TeamMatchSeatActionBoundary
                 || beforeOther.IsMatchFinished != afterOther.IsMatchFinished)
             {
                 this.tableRevisions[other]++;
+                this.publicEvents[other].Append(GameEventProjector.ProjectSharedBoundary(
+                    beforeOther,
+                    afterOther,
+                    this.publicEvents[other].NextSequence));
             }
 
             return new TeamMatchSeatActionResult(
@@ -223,16 +283,29 @@ internal sealed class TeamMatchSeatActionBoundary
             }
 
             var other = table == 1 ? 2 : 1;
-            var before = this.game.GetSeatView(other, PlayerPosition.South);
+            var before = this.game.GetSeatView(table, seat);
+            var beforeOther = this.game.GetSeatView(other, PlayerPosition.South);
             var result = this.game.Act(table, seat, action);
             if (result == BelotActResult.Ok)
             {
                 this.tableRevisions[table]++;
-                var after = this.game.GetSeatView(other, PlayerPosition.South);
-                if (before.RoundNumber != after.RoundNumber
-                    || before.IsMatchFinished != after.IsMatchFinished)
+                var after = this.game.GetSeatView(table, seat);
+                this.publicEvents[table].Append(GameEventProjector.Project(
+                    before,
+                    after,
+                    seat,
+                    action,
+                    this.publicEvents[table].NextSequence,
+                    actorIsAutomatic: true));
+                var afterOther = this.game.GetSeatView(other, PlayerPosition.South);
+                if (beforeOther.RoundNumber != afterOther.RoundNumber
+                    || beforeOther.IsMatchFinished != afterOther.IsMatchFinished)
                 {
                     this.tableRevisions[other]++;
+                    this.publicEvents[other].Append(GameEventProjector.ProjectSharedBoundary(
+                        beforeOther,
+                        afterOther,
+                        this.publicEvents[other].NextSequence));
                 }
             }
 

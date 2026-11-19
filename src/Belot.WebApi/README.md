@@ -33,6 +33,109 @@ The profiles match the app: Random is `RandomPlayer`, Beginner `DummyPlayer`, Sk
 `SmartPlayer`, Expert `ClaudePlayerProfiles.CreateExpert()`, and Master
 `ClaudePlayerProfiles.CreateHeuristic()`.
 
+### Team Match public-event playback
+
+Authenticated Team Match members can fetch their current private seat snapshot and replay the
+public gameplay events for their table:
+
+- `GET /api/team-matches/{matchId}/game?afterSequence={cursor}`
+- `POST /api/team-matches/{matchId}/game/actions`
+
+Each table has its own monotonically increasing integer event cursor, beginning at `-1`. A GET
+without `afterSequence` remains a snapshot-only read and includes the current `lastEventSequence`
+with an empty `events` array. Use `afterSequence=-1` after an initial snapshot to replay all
+retained events; use the last observed `sequence` to continue. Cursors from one table must not be
+used for the other table.
+
+The action body retains `expectedTableRevision`, `commandId`, and `action`, and accepts optional
+`afterSequence`. If omitted, a successful POST returns the events produced by that accepted
+action and its automatic bot continuation. If supplied, it returns events after that cursor.
+Retries of an accepted `commandId` remain conflicts and do not apply or publish the action again.
+
+Both endpoints return the existing seat snapshot fields plus `lastEventSequence`,
+`snapshotRequired`, and `events`. If a cursor is ahead of the journal or its history has expired,
+the response sets `snapshotRequired` to `true` and returns an empty `events` array; the included
+`state` is the authoritative current view for that authenticated seat. Replace the client state
+and resume from `lastEventSequence`; do not attempt to animate a partial replay. A cursor less
+than `-1` is invalid.
+
+The event list contains only public bids/contracts, declarations, played cards, completed tricks,
+deal results, deal starts, and match completion, ordered by `sequence`. It never contains private
+hands, legal actions, account IDs, authentication tokens, or invitation secrets. The snapshot's
+`state` continues to contain only the requesting member's private hand and legal actions. Example
+request and abridged response:
+
+```http
+GET /api/team-matches/match-id/game?afterSequence=8
+Authorization: Bearer <access-token>
+```
+
+```json
+{
+  "matchId": "match-id",
+  "table": 2,
+  "yourSeat": "South",
+  "revision": 4,
+  "isPaused": false,
+  "automationPending": false,
+  "lastEventSequence": 10,
+  "snapshotRequired": false,
+  "events": [
+    { "sequence": 9, "type": "bid", "roundNumber": 1, "seat": "South", "bid": "Pass", "automatic": false },
+    { "sequence": 10, "type": "bid", "roundNumber": 1, "seat": "East", "bid": "Pass", "automatic": true }
+  ],
+  "state": {
+    "gameId": "match-id",
+    "bots": { "East": "skilled", "North": "skilled", "West": "skilled" },
+    "isFinished": false,
+    "winner": null,
+    "toMove": "North",
+    "decision": "Bid",
+    "roundNumber": 1,
+    "firstToPlay": "South",
+    "southNorthPoints": 0,
+    "eastWestPoints": 0,
+    "hangingPoints": 0,
+    "contract": { "seat": "Unknown", "type": "Pass" },
+    "bids": [
+      { "seat": "South", "type": "Pass" },
+      { "seat": "East", "type": "Pass" }
+    ],
+    "announces": [],
+    "tricks": [],
+    "currentTrick": [],
+    "cardCounts": [5, 5, 5, 5],
+    "hand": [
+      { "suit": "Club", "type": "Ace" },
+      { "suit": "Club", "type": "Seven" },
+      { "suit": "Diamond", "type": "Jack" },
+      { "suit": "Heart", "type": "Ten" },
+      { "suit": "Spade", "type": "King" }
+    ],
+    "availableBids": ["Clubs", "Diamonds", "Hearts", "Spades", "NoTrumps", "AllTrumps"],
+    "availableAnnounces": [],
+    "playableCards": [],
+    "beloteCards": [],
+    "previousRounds": []
+  }
+}
+```
+
+For an action, include the last processed sequence when you want the response to replay from it:
+
+```json
+{
+  "expectedTableRevision": 4,
+  "commandId": "client-generated-retry-key",
+  "afterSequence": 8,
+  "action": { "bid": "Pass" }
+}
+```
+
+History is bounded per table to 512 events by default. `TeamMatch:PublicEventsPerTable` may be
+configured from 1 to 4096; changing retention affects only how far back clients can replay, not
+the current game state.
+
 ### Example requests
 
 ```sh
