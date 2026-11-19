@@ -49,6 +49,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     private readonly int? realtimeEventsPerLobby;
 
+    private readonly int? teamMatchPublicEventsPerTable;
+
     private readonly bool failRealtimeGameDelivery;
 
     private readonly string? corsAllowedOrigin;
@@ -65,7 +67,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         int? realtimeEventsPerLobby = null,
         bool failRealtimeGameDelivery = false,
         string? corsAllowedOrigin = null,
-        IProfileDisplayNameProvider? profileDisplayNameProvider = null)
+        IProfileDisplayNameProvider? profileDisplayNameProvider = null,
+        int? teamMatchPublicEventsPerTable = null)
     {
         this.revealHandsEnabled = revealHandsEnabled;
         this.debugAccessKey = debugAccessKey;
@@ -74,6 +77,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         this.multiplayerConnectionString = multiplayerConnectionString;
         this.realtimeEventsPerGame = realtimeEventsPerGame;
         this.realtimeEventsPerLobby = realtimeEventsPerLobby;
+        this.teamMatchPublicEventsPerTable = teamMatchPublicEventsPerTable;
         this.failRealtimeGameDelivery = failRealtimeGameDelivery;
         this.corsAllowedOrigin = corsAllowedOrigin;
         this.profileDisplayNameProvider = profileDisplayNameProvider;
@@ -133,6 +137,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 ["Multiplayer:PostgresConnectionString"] = this.multiplayerConnectionString,
                 ["Multiplayer:Realtime:EventsPerGame"] = this.realtimeEventsPerGame?.ToString(),
                 ["Multiplayer:Realtime:EventsPerLobby"] = this.realtimeEventsPerLobby?.ToString(),
+                ["TeamMatch:PublicEventsPerTable"] = this.teamMatchPublicEventsPerTable?.ToString(),
             };
             if (this.corsAllowedOrigin is not null)
             {

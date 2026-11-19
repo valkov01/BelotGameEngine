@@ -26,8 +26,14 @@ internal static class TeamMatchHostEndpoints
         group.MapPost("/{matchId}/organizer/kick", Kick);
         group.MapPost("/{matchId}/organizer/invite-replacement", InviteReplacement);
         group.MapPost("/{matchId}/organizer/assign-replacement-bot", AssignReplacementBot);
-        group.MapGet("/{matchId}/game", GetGame);
-        group.MapPost("/{matchId}/game/actions", SubmitAction);
+        group.MapGet("/{matchId}/game", GetGame)
+            .WithName("GetTeamMatchGame")
+            .WithSummary("Get a private Team Match seat snapshot and public events after a cursor")
+            .WithDescription("If event history for afterSequence has expired, returns an authoritative snapshot with an empty event list and snapshotRequired=true.");
+        group.MapPost("/{matchId}/game/actions", SubmitAction)
+            .WithName("SubmitTeamMatchGameAction")
+            .WithSummary("Submit a revision-checked Team Match action")
+            .WithDescription("Accepts an action only from the authenticated current seat. Optional afterSequence returns public events since that table cursor; expired history returns an authoritative seat snapshot instead of a partial event list.");
         group.MapPost("/{matchId}/game/bots/resume", ResumeBots);
         return group;
     }
@@ -111,8 +117,8 @@ internal static class TeamMatchHostEndpoints
             result => Results.Ok(result.Lobby));
 
     private static IResult GetGame(
-        string matchId, ClaimsPrincipal caller, TeamMatchLobbyService rooms) =>
-        Respond(rooms.GetPrivateGame(matchId, UserId(caller)),
+        string matchId, int? afterSequence, ClaimsPrincipal caller, TeamMatchLobbyService rooms) =>
+        Respond(rooms.GetPrivateGame(matchId, UserId(caller), afterSequence),
             result => Results.Ok(result.Game));
 
     private static IResult SubmitAction(
