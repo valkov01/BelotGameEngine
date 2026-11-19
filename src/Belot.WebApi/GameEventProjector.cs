@@ -133,4 +133,31 @@ internal static class GameEventProjector
 
         return events;
     }
+
+    public static IReadOnlyList<PublicGameEventDto> ProjectSharedBoundary(
+        BelotSeatView before,
+        BelotSeatView after,
+        int firstSequence)
+    {
+        var events = new List<PublicGameEventDto>();
+        if (after.RoundNumber > before.RoundNumber && !after.IsMatchFinished)
+        {
+            events.Add(new PublicGameEventDto(
+                firstSequence + events.Count,
+                "deal-started",
+                after.RoundNumber,
+                Seat: after.FirstToPlayInTheRound.ToString()));
+        }
+
+        if (!before.IsMatchFinished && after.IsMatchFinished)
+        {
+            events.Add(new PublicGameEventDto(
+                firstSequence + events.Count,
+                "match-ended",
+                after.RoundNumber,
+                MatchFinished: true));
+        }
+
+        return events;
+    }
 }

@@ -13,7 +13,7 @@ public sealed record AssignTeamMatchReplacementBotRequest(int Table, PlayerPosit
 public sealed record TeamMatchInactivityReportRequest(int Table, PlayerPosition Seat, string? Reason);
 
 public sealed record TeamMatchHumanActionRequest(
-    long ExpectedTableRevision, string? CommandId, GameActionRequest? Action);
+    long ExpectedTableRevision, string? CommandId, GameActionRequest? Action, int? AfterSequence = null);
 
 public sealed record ResumeTeamMatchBotsRequest(int Table);
 
@@ -43,7 +43,14 @@ internal sealed record TeamMatchOrganizerOverviewDto(
 
 public sealed record TeamMatchGameSnapshotDto(
     string MatchId, int Table, PlayerPosition YourSeat, long Revision,
-    bool IsPaused, bool AutomationPending, GameStateDto State);
+    bool IsPaused, bool AutomationPending, GameStateDto State)
+{
+    public int LastEventSequence { get; init; } = -1;
+
+    public bool SnapshotRequired { get; init; }
+
+    public IReadOnlyList<PublicGameEventDto> Events { get; init; } = Array.Empty<PublicGameEventDto>();
+}
 
 internal sealed record TeamMatchHostResult(
     TeamMatchLobbyStatus Status,
@@ -451,7 +458,7 @@ internal sealed partial class TeamMatchLobbyService
         }
     }
 
-    public TeamMatchHostResult GetPrivateGame(string matchId, string userId)
+    public TeamMatchHostResult GetPrivateGame(string matchId, string userId, int? afterSequence = null)
     {
         lock (this.gate)
         {
@@ -459,6 +466,11 @@ internal sealed partial class TeamMatchLobbyService
             if (member.Status != TeamMatchLobbyStatus.Success)
             {
                 return HostProblem(member);
+            }
+
+            if (afterSequence is < -1)
+            {
+                return InvalidHost("afterSequence must be -1 or a non-negative event sequence.");
             }
 
             var room = this.rooms[matchId];
@@ -475,12 +487,26 @@ internal sealed partial class TeamMatchLobbyService
                 return new TeamMatchHostResult(TeamMatchLobbyStatus.Forbidden);
             }
 
+            var lastEventSequence = room.Actions.GetLastEventSequence(userId, seat.Table, seat.Position);
+            if (!lastEventSequence.HasValue)
+            {
+                return new TeamMatchHostResult(TeamMatchLobbyStatus.Forbidden);
+            }
+
+            var replay = afterSequence.HasValue
+                ? room.Actions.GetPublicEventsAfter(userId, seat.Table, seat.Position, afterSequence.Value)
+                : null;
             return new TeamMatchHostResult(
                 TeamMatchLobbyStatus.Success,
                 Game: new TeamMatchGameSnapshotDto(
                     room.Id, seat.Table, seat.Position, revision.Value,
                     TablePaused(room, seat.Table), room.BotAutomationPending[seat.Table],
-                    ApiMapper.ToState(room.Id, BotMap(room, seat.Table), view)));
+                    ApiMapper.ToState(room.Id, BotMap(room, seat.Table), view))
+                {
+                    LastEventSequence = replay?.LastEventSequence ?? lastEventSequence.Value,
+                    SnapshotRequired = replay?.SnapshotRequired ?? false,
+                    Events = replay?.Events ?? Array.Empty<PublicGameEventDto>(),
+                });
         }
     }
 
@@ -502,6 +528,11 @@ internal sealed partial class TeamMatchLobbyService
                 return HostProblem(member);
             }
 
+            if (request.AfterSequence is < -1)
+            {
+                return InvalidHost("afterSequence must be -1 or a non-negative event sequence.");
+            }
+
             var room = this.rooms[matchId];
             if (room.Game == null || room.Actions == null)
             {
@@ -520,6 +551,28 @@ internal sealed partial class TeamMatchLobbyService
                 return new TeamMatchHostResult(TeamMatchLobbyStatus.Forbidden);
             }
 
+            var lastEventSequence = room.Actions.GetLastEventSequence(userId, seat.Table, seat.Position);
+            if (!lastEventSequence.HasValue)
+            {
+                return new TeamMatchHostResult(TeamMatchLobbyStatus.Forbidden);
+            }
+
+            if (room.Actions.IsDuplicateCommand(
+                userId, seat.Table, seat.Position, request.CommandId!))
+            {
+                return ConflictHost("Action not accepted: DuplicateCommand.");
+            }
+
+            var requestedReplay = request.AfterSequence.HasValue
+                ? room.Actions.GetPublicEventsAfter(
+                    userId, seat.Table, seat.Position, request.AfterSequence.Value)
+                : null;
+            if (request.AfterSequence.HasValue && requestedReplay == null)
+            {
+                return new TeamMatchHostResult(TeamMatchLobbyStatus.Forbidden);
+            }
+
+            var afterSequence = request.AfterSequence ?? lastEventSequence.Value;
             if (!GameService.TryBuildAction(view, request.Action, out var action, out var error))
             {
                 return InvalidHost(error);
@@ -537,7 +590,20 @@ internal sealed partial class TeamMatchLobbyService
 
             this.ContinueAssignedBots(room, seat.Table);
             this.ContinueAssignedBots(room, seat.Table == 1 ? 2 : 1);
-            return this.GetPrivateGame(matchId, userId);
+            var response = this.GetPrivateGame(matchId, userId, afterSequence);
+            if (requestedReplay?.SnapshotRequired != true || response.Game == null)
+            {
+                return response;
+            }
+
+            return response with
+            {
+                Game = response.Game with
+                {
+                    SnapshotRequired = true,
+                    Events = Array.Empty<PublicGameEventDto>(),
+                },
+            };
         }
     }
 

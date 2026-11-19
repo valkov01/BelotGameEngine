@@ -33,6 +33,109 @@ The profiles match the app: Random is `RandomPlayer`, Beginner `DummyPlayer`, Sk
 `SmartPlayer`, Expert `ClaudePlayerProfiles.CreateExpert()`, and Master
 `ClaudePlayerProfiles.CreateHeuristic()`.
 
+### Team Match public-event playback
+
+Authenticated Team Match members can fetch their current private seat snapshot and replay the
+public gameplay events for their table:
+
+- `GET /api/team-matches/{matchId}/game?afterSequence={cursor}`
+- `POST /api/team-matches/{matchId}/game/actions`
+
+Each table has its own monotonically increasing integer event cursor, beginning at `-1`. A GET
+without `afterSequence` remains a snapshot-only read and includes the current `lastEventSequence`
+with an empty `events` array. Use `afterSequence=-1` after an initial snapshot to replay all
+retained events; use the last observed `sequence` to continue. Cursors from one table must not be
+used for the other table.
+
+The action body retains `expectedTableRevision`, `commandId`, and `action`, and accepts optional
+`afterSequence`. If omitted, a successful POST returns the events produced by that accepted
+action and its automatic bot continuation. If supplied, it returns events after that cursor.
+Retries of an accepted `commandId` remain conflicts and do not apply or publish the action again.
+
+Both endpoints return the existing seat snapshot fields plus `lastEventSequence`,
+`snapshotRequired`, and `events`. If a cursor is ahead of the journal or its history has expired,
+the response sets `snapshotRequired` to `true` and returns an empty `events` array; the included
+`state` is the authoritative current view for that authenticated seat. Replace the client state
+and resume from `lastEventSequence`; do not attempt to animate a partial replay. A cursor less
+than `-1` is invalid.
+
+The event list contains only public bids/contracts, declarations, played cards, completed tricks,
+deal results, deal starts, and match completion, ordered by `sequence`. It never contains private
+hands, legal actions, account IDs, authentication tokens, or invitation secrets. The snapshot's
+`state` continues to contain only the requesting member's private hand and legal actions. Example
+request and abridged response:
+
+```http
+GET /api/team-matches/match-id/game?afterSequence=8
+Authorization: Bearer <access-token>
+```
+
+```json
+{
+  "matchId": "match-id",
+  "table": 2,
+  "yourSeat": "South",
+  "revision": 4,
+  "isPaused": false,
+  "automationPending": false,
+  "lastEventSequence": 10,
+  "snapshotRequired": false,
+  "events": [
+    { "sequence": 9, "type": "bid", "roundNumber": 1, "seat": "South", "bid": "Pass", "automatic": false },
+    { "sequence": 10, "type": "bid", "roundNumber": 1, "seat": "East", "bid": "Pass", "automatic": true }
+  ],
+  "state": {
+    "gameId": "match-id",
+    "bots": { "East": "skilled", "North": "skilled", "West": "skilled" },
+    "isFinished": false,
+    "winner": null,
+    "toMove": "North",
+    "decision": "Bid",
+    "roundNumber": 1,
+    "firstToPlay": "South",
+    "southNorthPoints": 0,
+    "eastWestPoints": 0,
+    "hangingPoints": 0,
+    "contract": { "seat": "Unknown", "type": "Pass" },
+    "bids": [
+      { "seat": "South", "type": "Pass" },
+      { "seat": "East", "type": "Pass" }
+    ],
+    "announces": [],
+    "tricks": [],
+    "currentTrick": [],
+    "cardCounts": [5, 5, 5, 5],
+    "hand": [
+      { "suit": "Club", "type": "Ace" },
+      { "suit": "Club", "type": "Seven" },
+      { "suit": "Diamond", "type": "Jack" },
+      { "suit": "Heart", "type": "Ten" },
+      { "suit": "Spade", "type": "King" }
+    ],
+    "availableBids": ["Clubs", "Diamonds", "Hearts", "Spades", "NoTrumps", "AllTrumps"],
+    "availableAnnounces": [],
+    "playableCards": [],
+    "beloteCards": [],
+    "previousRounds": []
+  }
+}
+```
+
+For an action, include the last processed sequence when you want the response to replay from it:
+
+```json
+{
+  "expectedTableRevision": 4,
+  "commandId": "client-generated-retry-key",
+  "afterSequence": 8,
+  "action": { "bid": "Pass" }
+}
+```
+
+History is bounded per table to 512 events by default. `TeamMatch:PublicEventsPerTable` may be
+configured from 1 to 4096; changing retention affects only how far back clients can replay, not
+the current game state.
+
 ### Example requests
 
 ```sh
@@ -101,9 +204,57 @@ and the Authorization, Content-Type, Accept and X-Belot-Debug-Key request header
 are enabled for these explicitly configured origins, including SignalR negotiation requests.
 
 The public API contract is available at `https://belotgameengine.onrender.com/openapi/v1.json`.
-The global IP-based rate limit defaults to 120 requests per 60 seconds; tune it with
-`RateLimit__PermitLimit` and `RateLimit__WindowSeconds`. `Games__MaximumActive` limits stored
-games (default 500).
+The default global IP-based rate limit remains 120 requests per 60 seconds; tune it with
+`RateLimit__PermitLimit` and `RateLimit__WindowSeconds`. The default is active unless the
+hybrid Team Match policy is explicitly enabled. When hybrid limiting is enabled, the default
+IP limit remains active for Solo and ordinary multiplayer endpoints; only Team Match endpoints
+use the hybrid IP and authenticated-user policies. `Games__MaximumActive` limits stored games
+(default 500).
+
+### Opt-in Team Match hybrid rate limiting
+
+`RateLimit__Hybrid__Enabled=true` replaces the default global limiter for that process with
+two layers:
+
+- a pre-authentication IP aggregate request budget and aggregate zero-queue concurrency cap;
+- validated-JWT `sub`-partitioned, zero-queue read and mutation budgets for authenticated Team
+  Match endpoints, plus a per-user concurrency cap.
+
+The per-user identity is read only from the already validated authorization principal. Multiple
+tabs using the same account share its budgets. Authentication, membership, seat ownership,
+revision checks and private-hand projection still run as before. Rejected requests stop before
+Team Match endpoint handlers and therefore cannot mutate game state.
+
+Application-generated 429 responses include `X-Belot-RateLimit-Source: application`,
+`X-Belot-RateLimit-Policy` and `Retry-After`. These response headers are exposed to trusted CORS
+origins for browser inspection. Diagnostic logs contain only the policy, route template, trace
+ID and a truncated SHA-256 partition hash; bearer tokens, raw user IDs and private state are
+not logged.
+
+Hybrid-policy settings (disabled by default):
+
+| Environment variable | Disabled-path default | Hybrid default candidate |
+| --- | --- | --- |
+| `RateLimit__Hybrid__Enabled` | `false` | `true` only for staging evaluation |
+| `RateLimit__Hybrid__IpPermitLimit` | unused | `600` requests/window |
+| `RateLimit__Hybrid__WindowSeconds` | unused | `60` |
+| `RateLimit__Hybrid__TeamMatchReadPermitLimit` | unused | `90` requests/window/user |
+| `RateLimit__Hybrid__TeamMatchMutationPermitLimit` | unused | `20` requests/window/user |
+| `RateLimit__Hybrid__PerUserConcurrencyLimit` | unused | `4` |
+| `RateLimit__Hybrid__AggregateConcurrencyLimit` | unused | `32` |
+
+These higher-capacity values are **staging candidates only**, not approved production quotas.
+Do not enable the hybrid policy or alter production Render settings without Product Owner
+approval and a measured staging load test. The disabled path preserves the existing 120 requests
+per minute IP policy.
+
+The API intentionally uses only ASP.NET Core's `Connection.RemoteIpAddress`. It does not trust a
+client-provided `X-Forwarded-For`. Before staging activation on Render, confirm from controlled
+tests and app logs whether the effective value is the actual client address or a shared Render
+proxy address. Configuring forwarded headers requires known, Render-controlled proxy addresses
+and the live hop topology; do not invent or trust all proxies. If the client IP cannot be safely
+recovered, the aggregate IP guard may become a shared-proxy service guard while the validated-user
+limits remain independently enforced.
 
 ### Multiplayer seat display names
 
