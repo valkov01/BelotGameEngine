@@ -103,7 +103,9 @@ are enabled for these explicitly configured origins, including SignalR negotiati
 The public API contract is available at `https://belotgameengine.onrender.com/openapi/v1.json`.
 The default global IP-based rate limit remains 120 requests per 60 seconds; tune it with
 `RateLimit__PermitLimit` and `RateLimit__WindowSeconds`. The default is active unless the
-hybrid Team Match policy is explicitly enabled. `Games__MaximumActive` limits stored games
+hybrid Team Match policy is explicitly enabled. When hybrid limiting is enabled, the default
+IP limit remains active for Solo and ordinary multiplayer endpoints; only Team Match endpoints
+use the hybrid IP and authenticated-user policies. `Games__MaximumActive` limits stored games
 (default 500).
 
 ### Opt-in Team Match hybrid rate limiting
@@ -121,9 +123,10 @@ revision checks and private-hand projection still run as before. Rejected reques
 Team Match endpoint handlers and therefore cannot mutate game state.
 
 Application-generated 429 responses include `X-Belot-RateLimit-Source: application`,
-`X-Belot-RateLimit-Policy` and `Retry-After`. Diagnostic logs contain only the policy, route
-template, trace ID and a truncated SHA-256 partition hash; bearer tokens, raw user IDs and
-private state are not logged.
+`X-Belot-RateLimit-Policy` and `Retry-After`. These response headers are exposed to trusted CORS
+origins for browser inspection. Diagnostic logs contain only the policy, route template, trace
+ID and a truncated SHA-256 partition hash; bearer tokens, raw user IDs and private state are
+not logged.
 
 Hybrid-policy settings (disabled by default):
 
