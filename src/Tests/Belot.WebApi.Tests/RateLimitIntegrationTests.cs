@@ -44,13 +44,13 @@ public sealed class RateLimitIntegrationTests
     [Fact]
     public async Task EightAccountsHaveIndependentReadBudgetsOnTheSameIp()
     {
-        using var factory = CreateHybridFactory(ipLimit: 1000, readLimit: 2);
+        using var factory = CreateHybridFactory(ipLimit: 1000, readLimit: 16);
         using var client = factory.CreateClient();
 
         for (var userNumber = 0; userNumber < 8; userNumber++)
         {
             var user = "independent-user-" + userNumber;
-            for (var requestNumber = 0; requestNumber < 2; requestNumber++)
+            for (var requestNumber = 0; requestNumber < 16; requestNumber++)
             {
                 using var accepted = await Send(
                     client,
@@ -336,23 +336,46 @@ public sealed class RateLimitIntegrationTests
     }
 
     [Fact]
-    public async Task HybridPolicyDoesNotChangeSoloOrNormalMultiplayer()
+    public async Task HybridPolicyRetainsLegacyLimitForSoloEndpoints()
     {
-        using var factory = CreateHybridFactory(ipLimit: 100, mutationLimit: 1);
+        using var factory = CreateHybridFactory(ipLimit: 1000, mutationLimit: 1);
+        using var client = factory.CreateClient();
+
+        for (var request = 0; request < 120; request++)
+        {
+            using var accepted = await client.GetAsync("/api/games/not-a-game");
+            Assert.Equal(HttpStatusCode.NotFound, accepted.StatusCode);
+        }
+
+        using var rejected = await client.GetAsync("/api/games/not-a-game");
+        AssertRateLimited(rejected, "legacy-ip");
+    }
+
+    [Fact]
+    public async Task HybridPolicyRetainsLegacyLimitForNormalMultiplayerEndpoints()
+    {
+        using var factory = CreateHybridFactory(ipLimit: 1000, mutationLimit: 1);
         using var client = factory.CreateClient();
         var user = Guid.NewGuid().ToString();
 
-        using var solo = await client.PostAsJsonAsync("/api/games", new CreateGameRequest());
-        Assert.Equal(HttpStatusCode.Created, solo.StatusCode);
+        for (var request = 0; request < 120; request++)
+        {
+            using var accepted = await Send(
+                client,
+                HttpMethod.Get,
+                "/api/multiplayer/lobbies/not-a-room",
+                user,
+                ipAddress: "198.51.100.90");
+            Assert.Equal(HttpStatusCode.NotFound, accepted.StatusCode);
+        }
 
-        using var multiplayer = await Send(
+        using var rejected = await Send(
             client,
-            HttpMethod.Post,
-            "/api/multiplayer/rooms",
+            HttpMethod.Get,
+            "/api/multiplayer/lobbies/not-a-room",
             user,
-            new CreateMultiplayerRoomRequest(),
-            "198.51.100.90");
-        Assert.Equal(HttpStatusCode.Created, multiplayer.StatusCode);
+            ipAddress: "198.51.100.90");
+        AssertRateLimited(rejected, "legacy-ip");
     }
 
     [Fact]
@@ -397,6 +420,47 @@ public sealed class RateLimitIntegrationTests
         Assert.Equal("team-match-user-concurrency", userSecond.Policy);
     }
 
+    [Fact]
+    public async Task BrowserCanInspectApplicationRateLimitHeaders()
+    {
+        const string origin = "https://preview--belote-bridge-battle.lovable.app";
+        using var factory = new ApiFactory(
+            corsAllowedOrigin: origin,
+            useProductionRateLimit: true,
+            hybridRateLimitEnabled: true,
+            hybridIpPermitLimit: 1);
+        using var client = factory.CreateClient();
+
+        using var accepted = await Send(
+            client,
+            HttpMethod.Get,
+            "/api/team-matches/not-a-member",
+            Guid.NewGuid().ToString(),
+            ipAddress: "198.51.100.110",
+            origin: origin);
+        Assert.Equal(HttpStatusCode.NotFound, accepted.StatusCode);
+
+        using var rejected = await Send(
+            client,
+            HttpMethod.Get,
+            "/api/team-matches/not-a-member",
+            Guid.NewGuid().ToString(),
+            ipAddress: "198.51.100.110",
+            origin: origin);
+        AssertRateLimited(rejected, "hybrid-ip");
+        Assert.Equal(origin, rejected.Headers.GetValues("Access-Control-Allow-Origin").Single());
+        var exposedHeaders = rejected.Headers.GetValues("Access-Control-Expose-Headers").Single();
+        Assert.Contains(
+            RateLimitDiagnostics.SourceHeader,
+            exposedHeaders,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(
+            RateLimitDiagnostics.PolicyHeader,
+            exposedHeaders,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Retry-After", exposedHeaders, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static ApiFactory CreateHybridFactory(
         int ipLimit = 600,
         int readLimit = 90,
@@ -419,7 +483,8 @@ public sealed class RateLimitIntegrationTests
         string? user,
         object? body = null,
         string? ipAddress = null,
-        string? accessToken = null)
+        string? accessToken = null,
+        string? origin = null)
     {
         var request = user is null && accessToken is null
             ? new HttpRequestMessage(method, path)
@@ -435,6 +500,11 @@ public sealed class RateLimitIntegrationTests
         if (ipAddress != null)
         {
             request.Headers.Add("X-Test-Client-Ip", ipAddress);
+        }
+
+        if (origin != null)
+        {
+            request.Headers.Add("Origin", origin);
         }
 
         return await client.SendAsync(request);

@@ -92,6 +92,10 @@ builder.Services.AddCors(options =>
                 .WithOrigins(origins)
                 .WithMethods("GET", "POST", "DELETE", "OPTIONS")
                 .AllowAnyHeader()
+                .WithExposedHeaders(
+                    RateLimitDiagnostics.SourceHeader,
+                    RateLimitDiagnostics.PolicyHeader,
+                    "Retry-After")
                 .AllowCredentials();
         }
     });
@@ -176,17 +180,19 @@ if (string.IsNullOrWhiteSpace(postgresConnectionString))
 app.UseRouting();
 bool HybridRateLimitEnabled() =>
     app.Configuration.GetValue("RateLimit:Hybrid:Enabled", false);
-app.UseWhen(
-    _ => HybridRateLimitEnabled(),
-    branch => branch.UseMiddleware<HybridIpRateLimitMiddleware>());
+bool IsTeamMatchEndpoint(HttpContext context) =>
+    context.GetEndpoint()?.Metadata.GetMetadata<TeamMatchRateLimitMetadata>() is not null;
 app.UseCors();
+app.UseWhen(
+    context => HybridRateLimitEnabled() && IsTeamMatchEndpoint(context),
+    branch => branch.UseMiddleware<HybridIpRateLimitMiddleware>());
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseWhen(
     _ => HybridRateLimitEnabled(),
     branch => branch.UseMiddleware<TeamMatchRateLimitMiddleware>());
 app.UseWhen(
-    _ => !HybridRateLimitEnabled(),
+    context => !HybridRateLimitEnabled() || !IsTeamMatchEndpoint(context),
     branch => branch.UseRateLimiter());
 app.UseStaticFiles();
 
