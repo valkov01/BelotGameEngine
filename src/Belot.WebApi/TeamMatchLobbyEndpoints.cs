@@ -17,14 +17,22 @@ internal static class TeamMatchLobbyEndpoints
     internal static RouteGroupBuilder MapTeamMatchLobbyEndpoints(this IEndpointRouteBuilder endpoints)
     {
         var group = endpoints.MapGroup("/api/team-matches").RequireAuthorization("Multiplayer");
-        group.MapPost("/", CreateAsync);
-        group.MapGet("/{matchId}", GetAsync);
-        group.MapPost("/{matchId}/join", JoinAsync);
-        group.MapPost("/{matchId}/seat", MoveAsync);
-        group.MapPost("/{matchId}/bots", SetBotAsync);
-        group.MapPost("/{matchId}/reservations", ReserveAsync);
-        group.MapPost("/{matchId}/invitations/rotate", RotateInviteAsync);
-        group.MapPost("/{matchId}/start", StartAsync);
+        group.MapPost("/", CreateAsync)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
+        group.MapGet("/{matchId}", GetAsync)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Read));
+        group.MapPost("/{matchId}/join", JoinAsync)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
+        group.MapPost("/{matchId}/seat", MoveAsync)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
+        group.MapPost("/{matchId}/bots", SetBotAsync)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
+        group.MapPost("/{matchId}/reservations", ReserveAsync)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
+        group.MapPost("/{matchId}/invitations/rotate", RotateInviteAsync)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
+        group.MapPost("/{matchId}/start", StartAsync)
+            .WithMetadata(new TeamMatchRateLimitMetadata(TeamMatchRateLimitKind.Mutation));
         return group;
     }
 

@@ -101,9 +101,57 @@ and the Authorization, Content-Type, Accept and X-Belot-Debug-Key request header
 are enabled for these explicitly configured origins, including SignalR negotiation requests.
 
 The public API contract is available at `https://belotgameengine.onrender.com/openapi/v1.json`.
-The global IP-based rate limit defaults to 120 requests per 60 seconds; tune it with
-`RateLimit__PermitLimit` and `RateLimit__WindowSeconds`. `Games__MaximumActive` limits stored
-games (default 500).
+The default global IP-based rate limit remains 120 requests per 60 seconds; tune it with
+`RateLimit__PermitLimit` and `RateLimit__WindowSeconds`. The default is active unless the
+hybrid Team Match policy is explicitly enabled. When hybrid limiting is enabled, the default
+IP limit remains active for Solo and ordinary multiplayer endpoints; only Team Match endpoints
+use the hybrid IP and authenticated-user policies. `Games__MaximumActive` limits stored games
+(default 500).
+
+### Opt-in Team Match hybrid rate limiting
+
+`RateLimit__Hybrid__Enabled=true` replaces the default global limiter for that process with
+two layers:
+
+- a pre-authentication IP aggregate request budget and aggregate zero-queue concurrency cap;
+- validated-JWT `sub`-partitioned, zero-queue read and mutation budgets for authenticated Team
+  Match endpoints, plus a per-user concurrency cap.
+
+The per-user identity is read only from the already validated authorization principal. Multiple
+tabs using the same account share its budgets. Authentication, membership, seat ownership,
+revision checks and private-hand projection still run as before. Rejected requests stop before
+Team Match endpoint handlers and therefore cannot mutate game state.
+
+Application-generated 429 responses include `X-Belot-RateLimit-Source: application`,
+`X-Belot-RateLimit-Policy` and `Retry-After`. These response headers are exposed to trusted CORS
+origins for browser inspection. Diagnostic logs contain only the policy, route template, trace
+ID and a truncated SHA-256 partition hash; bearer tokens, raw user IDs and private state are
+not logged.
+
+Hybrid-policy settings (disabled by default):
+
+| Environment variable | Disabled-path default | Hybrid default candidate |
+| --- | --- | --- |
+| `RateLimit__Hybrid__Enabled` | `false` | `true` only for staging evaluation |
+| `RateLimit__Hybrid__IpPermitLimit` | unused | `600` requests/window |
+| `RateLimit__Hybrid__WindowSeconds` | unused | `60` |
+| `RateLimit__Hybrid__TeamMatchReadPermitLimit` | unused | `90` requests/window/user |
+| `RateLimit__Hybrid__TeamMatchMutationPermitLimit` | unused | `20` requests/window/user |
+| `RateLimit__Hybrid__PerUserConcurrencyLimit` | unused | `4` |
+| `RateLimit__Hybrid__AggregateConcurrencyLimit` | unused | `32` |
+
+These higher-capacity values are **staging candidates only**, not approved production quotas.
+Do not enable the hybrid policy or alter production Render settings without Product Owner
+approval and a measured staging load test. The disabled path preserves the existing 120 requests
+per minute IP policy.
+
+The API intentionally uses only ASP.NET Core's `Connection.RemoteIpAddress`. It does not trust a
+client-provided `X-Forwarded-For`. Before staging activation on Render, confirm from controlled
+tests and app logs whether the effective value is the actual client address or a shared Render
+proxy address. Configuring forwarded headers requires known, Render-controlled proxy addresses
+and the live hop topology; do not invent or trust all proxies. If the client IP cannot be safely
+recovered, the aggregate IP guard may become a shared-proxy service guard while the validated-user
+limits remain independently enforced.
 
 ### Multiplayer seat display names
 
