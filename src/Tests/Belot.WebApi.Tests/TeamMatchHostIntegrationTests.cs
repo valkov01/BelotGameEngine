@@ -71,6 +71,12 @@ public sealed class TeamMatchHostIntegrationTests : IDisposable
 
         using var revoked = await this.Send(HttpMethod.Get, root + "/game", guest);
         Assert.Equal(HttpStatusCode.Forbidden, revoked.StatusCode);
+        using var revokedEvents = await this.Send(
+            HttpMethod.Get, root + "/game?afterSequence=-1", guest);
+        Assert.Equal(HttpStatusCode.Forbidden, revokedEvents.StatusCode);
+        using var outsiderEvents = await this.Send(
+            HttpMethod.Get, root + "/game?afterSequence=-1", Guid.NewGuid().ToString());
+        Assert.Equal(HttpStatusCode.Forbidden, outsiderEvents.StatusCode);
         using var oldAction = await this.Send(HttpMethod.Post, root + "/game/actions", guest,
             new { expectedTableRevision = before.Revision, commandId = "stale-kicked",
                   action = new { bid = "Pass" } });

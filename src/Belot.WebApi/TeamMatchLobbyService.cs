@@ -3,6 +3,8 @@ namespace Belot.WebApi;
 using System.Security.Cryptography;
 using System.Text;
 
+using Microsoft.Extensions.Configuration;
+
 using Belot.Engine.Players;
 
 /// <summary>Only a private, unlisted two-table match is supported in A10.3.</summary>
@@ -98,6 +100,16 @@ internal sealed partial class TeamMatchLobbyService
     private readonly object gate = new();
 
     private readonly Dictionary<string, RoomState> rooms = new(StringComparer.Ordinal);
+
+    private readonly int publicEventCapacity;
+
+    public TeamMatchLobbyService(IConfiguration? configuration = null)
+    {
+        this.publicEventCapacity = Math.Clamp(
+            configuration?.GetValue("TeamMatch:PublicEventsPerTable", 512) ?? 512,
+            1,
+            4096);
+    }
 
     private sealed class SeatState
     {
@@ -434,7 +446,7 @@ internal sealed partial class TeamMatchLobbyService
                 .Select(seat => new TeamMatchHumanSeat(
                     seat.Table, seat.Position, seat.UserId!))
                 .ToArray();
-            match.Actions = new TeamMatchSeatActionBoundary(game, humanSeats);
+            match.Actions = new TeamMatchSeatActionBoundary(game, humanSeats, this.publicEventCapacity);
             match.Game = game;
             this.ContinueAssignedBots(match, 1);
             this.ContinueAssignedBots(match, 2);
