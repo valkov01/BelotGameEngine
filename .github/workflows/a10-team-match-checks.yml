@@ -8,12 +8,22 @@ on:
       - a02-multiplayer-foundation
       - feature/a10-team-matches-staging-integration
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Verification suite
+        required: true
+        type: choice
+        default: smoke-and-regressions
+        options:
+          - smoke-and-regressions
+          - full-matrix
 
 permissions:
   contents: read
 
 jobs:
   a10-core:
+    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'smoke-and-regressions'
     name: Smoke and regressions
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -50,3 +60,8 @@ jobs:
           name: a10-smoke-and-regression-test-reports
           path: TestResults/**/*.trx
           if-no-files-found: error
+
+  full-matrix:
+    if: github.event_name == 'workflow_dispatch' && inputs.suite == 'full-matrix'
+    name: Full supported matrix
+    uses: ./.github/workflows/a10-team-match-matrix.yml
