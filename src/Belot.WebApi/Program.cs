@@ -168,7 +168,21 @@ builder.Services.AddSingleton<MultiplayerRoomService>();
 builder.Services.AddSingleton<IRoomMembershipService>(services => services.GetRequiredService<MultiplayerRoomService>());
 builder.Services.AddSingleton<ISeatAssignmentService>(services => services.GetRequiredService<MultiplayerRoomService>());
 builder.Services.AddSingleton<IMultiplayerGameService, MultiplayerGameService>();
+builder.Services
+    .AddOptions<TeamMatchAutomationOptions>()
+    .Bind(builder.Configuration.GetSection(TeamMatchAutomationOptions.SectionName))
+    .Validate(
+        options => options.MaximumActiveMatches is >= 1 and <= 1000
+            && options.WakeupQueueCapacity is >= 1 and <= 4096
+            && options.ActionsPerCycle is >= 1 and <= 128
+            && options.IdleScanMilliseconds is >= 10 and <= 60000
+            && options.InterActionDelayMilliseconds is >= 0 and <= 1000
+            && options.MaximumDecisionRetries is >= 0 and <= 20
+            && options.RetryDelayMilliseconds is >= 10 and <= 60000,
+        "TeamMatch automation bounds are invalid.")
+    .ValidateOnStart();
 builder.Services.AddSingleton<TeamMatchLobbyService>();
+builder.Services.AddHostedService<TeamMatchBotAutomationService>();
 
 var app = builder.Build();
 

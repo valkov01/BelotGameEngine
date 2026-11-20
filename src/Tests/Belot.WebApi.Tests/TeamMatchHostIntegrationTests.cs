@@ -170,8 +170,8 @@ public sealed class TeamMatchHostIntegrationTests : IDisposable
             fx.Root + "/invitations/" + inviteId + "/accept", invited);
         Assert.Equal(HttpStatusCode.Forbidden, cannotAccept.StatusCode);
 
-        // No human remains at table 2, but the explicitly assigned bot moves
-        // immediately. Full autonomous all-bot completion is still A10.7.
+        // No human remains at table 2, so the hosted worker advances the
+        // explicitly assigned bot without a private table action.
         using var overview = await this.Send(HttpMethod.Get, fx.Root + "/organizer", fx.Host);
         var publicState = await overview.Content.ReadFromJsonAsync<JsonElement>();
         var second = publicState.GetProperty("tables").EnumerateArray()
@@ -213,6 +213,18 @@ public sealed class TeamMatchHostIntegrationTests : IDisposable
                 new TeamMatchHumanActionRequest(state.Revision, "mid-deal-" + guard, move));
             Assert.Equal(HttpStatusCode.OK, played.StatusCode);
             state = (await played.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
+            for (var wait = 0;
+                 wait < 100
+                 && !state.State.IsFinished
+                 && state.State.ToMove != PlayerPosition.South.ToString();
+                 wait++)
+            {
+                await Task.Delay(10);
+                using var refreshed = await this.Send(
+                    HttpMethod.Get, fx.Root + "/game", fx.Guest);
+                state = (await refreshed.Content
+                    .ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
+            }
         }
 
         Assert.True(state.State.Hand.Count < 8, "A human should have played at least one card.");

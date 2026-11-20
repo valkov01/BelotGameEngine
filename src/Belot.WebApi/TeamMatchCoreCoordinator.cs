@@ -179,6 +179,19 @@ internal sealed class TeamMatchCoreCoordinator
         }
     }
 
+    internal IReadOnlyList<BelotRoundRecord> GetRoundsForAudit(int table)
+    {
+        lock (this.gate)
+        {
+            if (!this.schedule.IsFinished)
+            {
+                throw new InvalidOperationException("The complete audit record is available after match completion.");
+            }
+
+            return this.GetTable(table).GetRecord().Rounds.ToArray();
+        }
+    }
+
     private BelotMatch GetTable(int table) => table switch
     {
         1 => this.tables[0],

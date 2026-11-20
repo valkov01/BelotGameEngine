@@ -301,7 +301,7 @@ public sealed class TeamMatchLobbyIntegrationTests : IDisposable
     }
 
     [Fact]
-    public async Task UntilFinalAutonomousBotsMilestoneStartRejectsZeroHumanTable()
+    public async Task OrganizerCanStartWithOneHumanAndAnEntireBotTable()
     {
         var host = Guid.NewGuid().ToString();
         var (lobby, _) = await this.CreateAsync(host);
@@ -322,11 +322,10 @@ public sealed class TeamMatchLobbyIntegrationTests : IDisposable
         }
 
         using var start = await this.SendAsync(HttpMethod.Post, url + "/start", host);
-        Assert.Equal(HttpStatusCode.Conflict, start.StatusCode);
-        Assert.Contains("human is required at each table", await start.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(HttpStatusCode.OK, start.StatusCode);
         using var stateResponse = await this.SendAsync(HttpMethod.Get, url, host);
         var state = (await stateResponse.Content.ReadFromJsonAsync<TeamMatchLobbyDto>(JsonOptions))!;
-        Assert.False(state.IsStarted);
+        Assert.True(state.IsStarted);
         Assert.Equal(8, state.Seats.Count(seat => seat.IsOccupied));
     }
 

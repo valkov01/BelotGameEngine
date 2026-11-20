@@ -164,8 +164,9 @@ public sealed class TeamMatchPublicEventJournalTests
         Assert.Equal(-1, tableTwo.LastEventSequence);
 
         var botResult = boundary.SubmitBotForTrustedCoordinator(
-            2, PlayerPosition.South, BelotAction.Bid(BidType.Pass));
-        Assert.Equal(BelotActResult.Ok, botResult);
+            2, PlayerPosition.South, 0, BelotAction.Bid(BidType.Pass));
+        Assert.Equal(TeamMatchSeatActionStatus.Accepted, botResult.Status);
+        Assert.Equal(BelotActResult.Ok, botResult.EngineResult);
         var botReplay = boundary.GetPublicEventsAfter("t2-East", 2, PlayerPosition.East, -1)!;
         var botBid = Assert.Single(botReplay.Events);
         Assert.Equal(0, botBid.Sequence);

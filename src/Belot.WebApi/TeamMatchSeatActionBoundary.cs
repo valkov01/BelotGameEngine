@@ -262,13 +262,26 @@ internal sealed class TeamMatchSeatActionBoundary
         }
     }
 
+    internal long GetTableRevisionForTrustedCoordinator(int table)
+    {
+        if (table is < 1 or > 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(table));
+        }
+
+        lock (this.gate)
+        {
+            return this.tableRevisions[table];
+        }
+    }
+
     /// <summary>
     /// Trusted explicit bot action; the surrounding lobby must first prove this
     /// exact seat currently has an ORGANIZER-ASSIGNED bot (never automatic fill).
     /// Bot and human actions use the same game/revision serialization lock.
     /// </summary>
-    internal BelotActResult SubmitBotForTrustedCoordinator(
-        int table, PlayerPosition seat, BelotAction action)
+    internal TeamMatchSeatActionResult SubmitBotForTrustedCoordinator(
+        int table, PlayerPosition seat, long expectedTableRevision, BelotAction action)
     {
         if (!ValidSeat(table, seat))
         {
@@ -280,6 +293,13 @@ internal sealed class TeamMatchSeatActionBoundary
             if (this.humanSeats.ContainsKey((table, seat)))
             {
                 throw new InvalidOperationException("A human controls the selected bot seat.");
+            }
+
+            if (this.tableRevisions[table] != expectedTableRevision)
+            {
+                return new TeamMatchSeatActionResult(
+                    TeamMatchSeatActionStatus.StaleRevision,
+                    this.tableRevisions[table]);
             }
 
             var other = table == 1 ? 2 : 1;
@@ -309,7 +329,15 @@ internal sealed class TeamMatchSeatActionBoundary
                 }
             }
 
-            return result;
+            return result == BelotActResult.Ok
+                ? new TeamMatchSeatActionResult(
+                    TeamMatchSeatActionStatus.Accepted,
+                    this.tableRevisions[table],
+                    result)
+                : new TeamMatchSeatActionResult(
+                    TeamMatchSeatActionStatus.RejectedByGameRules,
+                    this.tableRevisions[table],
+                    result);
         }
     }
 

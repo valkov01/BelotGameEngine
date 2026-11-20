@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   matrix:
-    name: Supported 119-scenario matrix
+    name: Supported 136-scenario matrix
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -21,13 +21,13 @@ jobs:
         run: >-
           dotnet test src/Tests/Belot.WebApi.Tests/Belot.WebApi.Tests.csproj
           --configuration Release
-          --filter "Category=TeamMatchSmoke|Category=TeamMatchBoundary|Category=TeamMatchMatrix"
+          --filter "Category=TeamMatchSmoke|Category=TeamMatchBoundary|Category=TeamMatchMatrix|Category=TeamMatchAutonomous"
           --logger "trx;LogFileName=a10-full-matrix.trx"
           --results-directory TestResults/A10Matrix
       - name: Upload full matrix report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: a10-team-match-119-scenario-report
+          name: a10-team-match-136-scenario-report
           path: TestResults/**/*.trx
           if-no-files-found: error

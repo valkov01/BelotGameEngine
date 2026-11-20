@@ -32,10 +32,16 @@ internal sealed class TeamMatchHttpSimulator
 
     private readonly ITestOutputHelper output;
 
-    public TeamMatchHttpSimulator(HttpClient client, ITestOutputHelper output)
+    private readonly Func<string, TeamMatchCoreCoordinator?> coordinator;
+
+    public TeamMatchHttpSimulator(
+        HttpClient client,
+        ITestOutputHelper output,
+        Func<string, TeamMatchCoreCoordinator?>? coordinator = null)
     {
         this.client = client;
         this.output = output;
+        this.coordinator = coordinator ?? (_ => null);
     }
 
     public async Task<TeamMatchSimulationAudit> RunAsync(TeamMatchSimulationScenario scenario)
@@ -48,28 +54,42 @@ internal sealed class TeamMatchHttpSimulator
         var completedAtLeastOnce = false;
         var safety = 0;
 
-        while (!setup.Snapshots.Values.All(snapshot => snapshot.State.IsFinished))
+        while (!setup.Coordinator!.IsFinished)
         {
             var dealNumber = expectedRows.Count + 1;
             Assert.True(++safety <= 64, $"Scenario {scenario.Name} exceeded its deal bound.");
 
-            var firstTable = scenario.TableFinishesFirst(1, dealNumber) ? 1 : 2;
-            var secondTable = firstTable == 1 ? 2 : 1;
-            var firstToPlay = await this.RefreshFirstToPlayAsync(setup, dealNumber);
-            Assert.Equal(firstToPlay[1], firstToPlay[2]);
+            if (scenario.HumanCount == 1)
+            {
+                await this.AssertUnpairedResultsAsync(setup, expectedRows);
+                await this.DriveTableOneDealAsync(setup, 1, dealNumber, counters);
+                await this.WaitForAutonomousTableAsync(setup, 2, dealNumber);
+            }
+            else
+            {
+                var firstTable = scenario.TableFinishesFirst(1, dealNumber) ? 1 : 2;
+                var secondTable = firstTable == 1 ? 2 : 1;
+                var firstToPlay = await this.RefreshFirstToPlayAsync(setup, dealNumber);
+                Assert.Equal(firstToPlay[1], firstToPlay[2]);
 
-            await this.DriveTableOneDealAsync(setup, firstTable, dealNumber, counters);
-            await this.AssertOneTableAheadAsync(
-                setup, firstTable, secondTable, dealNumber, expectedRows);
+                await this.DriveTableOneDealAsync(setup, firstTable, dealNumber, counters);
+                await this.AssertOneTableAheadAsync(
+                    setup, firstTable, secondTable, dealNumber, expectedRows);
+                await this.DriveTableOneDealAsync(setup, secondTable, dealNumber, counters);
+            }
 
-            await this.DriveTableOneDealAsync(setup, secondTable, dealNumber, counters);
             setup.Snapshots = await this.RefreshSnapshotsAsync(setup);
             var table1 = this.Round(setup, 1, dealNumber);
             var table2 = this.Round(setup, 2, dealNumber);
             Assert.Equal(table1.RoundNumber, table2.RoundNumber);
             Assert.Equal(dealNumber, table1.RoundNumber);
 
-            this.AssertIdenticalBoard(table1, table2, dealNumber);
+            this.AssertIdenticalBoard(
+                setup,
+                table1,
+                table2,
+                dealNumber,
+                scenario.HumanCount == 1);
             var expected = ExpectedComparedDeal.Create(
                 dealNumber,
                 table1,
@@ -115,35 +135,18 @@ internal sealed class TeamMatchHttpSimulator
         return audit;
     }
 
-    public async Task AssertUnsupportedAllBotTableAsync(TeamMatchSimulationScenario scenario)
-    {
-        Assert.Equal(1, scenario.HumanCount);
-        var setup = await this.CreateLobbyAsync(scenario);
-        foreach (var seat in AllSeats.Except(
-                     new[] { (scenario.HumanSeats()[0].Table, scenario.HumanSeats()[0].Seat) }))
-        {
-            using var bot = await this.SendAsync(
-                HttpMethod.Post,
-                setup.Root + "/bots",
-                setup.Host,
-                new { table = seat.Table, seat = seat.Seat, botProfileId = "skilled" });
-            this.AssertSuccess(bot);
-        }
-
-        using var start = await this.SendAsync(HttpMethod.Post, setup.Root + "/start", setup.Host);
-        Assert.Equal(HttpStatusCode.Conflict, start.StatusCode);
-        var message = await start.Content.ReadAsStringAsync();
-        Assert.Contains("human is required at each table", message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("autonomous all-bot tables", message, StringComparison.OrdinalIgnoreCase);
-    }
-
     private async Task<SimulationSetup> CreateAndStartAsync(
         TeamMatchSimulationScenario scenario)
     {
         var setup = await this.CreateLobbyAsync(scenario);
         var humanSeats = scenario.HumanSeats();
         Assert.Equal(scenario.HumanCount, humanSeats.Count);
-        Assert.All(new[] { 1, 2 }, table => Assert.Contains(humanSeats, human => human.Table == table));
+        if (scenario.HumanCount > 1)
+        {
+            Assert.All(
+                new[] { 1, 2 },
+                table => Assert.Contains(humanSeats, human => human.Table == table));
+        }
 
         var participants = new List<TeamMatchParticipant>
         {
@@ -190,6 +193,8 @@ internal sealed class TeamMatchHttpSimulator
         Assert.Equal(scenario.HumanCount, lobby.Seats.Count(seat => seat.BotProfileId == null));
         setup.Participants = participants;
         setup.Scenario = scenario;
+        setup.Coordinator = this.coordinator(setup.MatchId);
+        Assert.NotNull(setup.Coordinator);
         setup.Snapshots = await this.RefreshSnapshotsAsync(setup);
         await this.AssertPrivateLobbySurfaceAsync(setup);
         return setup;
@@ -232,7 +237,7 @@ internal sealed class TeamMatchHttpSimulator
         var guard = 0;
         while (true)
         {
-            Assert.True(++guard <= 500, $"Table {table} did not finish deal {dealNumber}.");
+            Assert.True(++guard <= 2_000, $"Table {table} did not finish deal {dealNumber}.");
             var snapshots = await this.RefreshSnapshotsAsync(setup, table);
             var current = snapshots.SingleOrDefault(
                 participant => participant.Value.Table == table
@@ -247,8 +252,8 @@ internal sealed class TeamMatchHttpSimulator
 
             if (current.Key == null || current.Value == null)
             {
-                throw new InvalidOperationException(
-                    $"No authenticated human can advance table {table}.");
+                await Task.Delay(10);
+                continue;
             }
 
             var action = this.ChooseAction(current.Value, dealNumber, counters);
@@ -267,6 +272,46 @@ internal sealed class TeamMatchHttpSimulator
             Assert.False(after.IsPaused);
             Assert.True(after.Revision >= current.Value.Revision);
             Assert.NotEqual(HttpStatusCode.TooManyRequests, response.StatusCode);
+        }
+    }
+
+    private async Task WaitForAutonomousTableAsync(
+        SimulationSetup setup,
+        int table,
+        int dealNumber)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        while (setup.Coordinator!.GetRoundsPlayed(table) < dealNumber
+            && !setup.Coordinator.IsFinished)
+        {
+            timeout.Token.ThrowIfCancellationRequested();
+            await Task.Delay(10, timeout.Token);
+        }
+
+        Assert.True(
+            setup.Coordinator.GetRoundsPlayed(table) >= dealNumber,
+            $"Autonomous table {table} did not finish deal {dealNumber}.");
+    }
+
+    private async Task AssertUnpairedResultsAsync(
+        SimulationSetup setup,
+        IReadOnlyList<ExpectedComparedDeal> expected)
+    {
+        using var response = await this.SendAsync(
+            HttpMethod.Get,
+            setup.Root + "/results",
+            setup.Host);
+        var results = await this.ReadRequiredAsync<TeamMatchResultsView>(response);
+        if (setup.Scenario.BarometerEnabled)
+        {
+            this.AssertRows(results.ComparedDeals, expected);
+            Assert.False(results.IsMatchComplete);
+        }
+        else
+        {
+            Assert.Null(results.Team1TotalPoints);
+            Assert.Empty(results.ComparedDeals);
+            Assert.False(results.IsMatchComplete);
         }
     }
 
@@ -351,6 +396,15 @@ internal sealed class TeamMatchHttpSimulator
             Assert.Equal(expected.Count, snapshot.State.PreviousRounds.Count));
         Assert.True(counters.Bids > 0);
         Assert.True(counters.Cards > 0);
+        var table1Audit = setup.Coordinator!.GetRoundsForAudit(1);
+        var table2Audit = setup.Coordinator.GetRoundsForAudit(2);
+        Assert.Equal(expected.Count, table1Audit.Count);
+        Assert.Equal(expected.Count, table2Audit.Count);
+        for (var index = 0; index < expected.Count; index++)
+        {
+            Assert.Equal(table1Audit[index].FirstToPlay, table2Audit[index].FirstToPlay);
+            Assert.Equal(table1Audit[index].Deal, table2Audit[index].Deal);
+        }
 
         using var response = await this.SendAsync(
             HttpMethod.Get,
@@ -467,6 +521,18 @@ internal sealed class TeamMatchHttpSimulator
 
     private RoundSummaryDto Round(SimulationSetup setup, int table, int dealNumber)
     {
+        if (!setup.Snapshots.Values.Any(snapshot => snapshot.Table == table))
+        {
+            var view = setup.Coordinator!.GetSeatView(
+                table,
+                PlayerPosition.South);
+            var state = ApiMapper.ToState(
+                setup.Root["/api/team-matches/".Length..],
+                new Dictionary<string, string>(),
+                view);
+            return state.PreviousRounds[dealNumber - 1];
+        }
+
         var rounds = setup.Snapshots.Values
             .Where(snapshot => snapshot.Table == table)
             .Select(snapshot => snapshot.State.PreviousRounds[dealNumber - 1])
@@ -478,10 +544,20 @@ internal sealed class TeamMatchHttpSimulator
     }
 
     private void AssertIdenticalBoard(
+        SimulationSetup setup,
         RoundSummaryDto table1,
         RoundSummaryDto table2,
-        int dealNumber)
+        int dealNumber,
+        bool autonomousTable)
     {
+        if (autonomousTable)
+        {
+            var board = setup.Coordinator!.GetBoardForAudit(dealNumber);
+            Assert.Equal(32, board.Count);
+            Assert.Equal(32, board.Distinct().Count());
+            return;
+        }
+
         Assert.Equal(8, table1.Tricks.Count);
         Assert.Equal(8, table2.Tricks.Count);
         var hands1 = this.HandsBySeat(table1);
@@ -580,7 +656,11 @@ internal sealed class TeamMatchHttpSimulator
         string InvitationCode,
         string Root)
     {
+        public TeamMatchCoreCoordinator? Coordinator { get; set; }
+
         public string MatchKey { get; } = Root[(Root.LastIndexOf('/') + 1)..];
+
+        public string MatchId => this.MatchKey;
 
         public IReadOnlyList<TeamMatchParticipant> Participants { get; set; } =
             Array.Empty<TeamMatchParticipant>();

@@ -24,7 +24,7 @@ public sealed record TeamMatchSimulationScenario(
     public static IEnumerable<object[]> Extended => HumanCounts
         .SelectMany(count => Enumerable.Range(5, 15).Select(deals => Scenario(count, deals)));
 
-    public static IEnumerable<object[]> DeferredAllBotTables =>
+    public static IEnumerable<object[]> AutonomousAllBotTables =>
         Enumerable.Range(4, 17).Select(deals => new object[]
         {
             new TeamMatchSimulationScenario(
