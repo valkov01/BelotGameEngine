@@ -115,6 +115,36 @@ public sealed class TeamMatchAutomatedSimulationTests
     }
 
     [Fact]
+    [Trait("Category", "TeamMatchHanging")]
+    public async Task OneHumanBarometerModesAuditAutonomousHangingExtension()
+    {
+        const int seed = 217;
+        foreach (var barometer in new[] { false, true })
+        {
+            using var factory = new ApiFactory(teamMatchDeckSeed: seed);
+            using var client = factory.CreateClient();
+            var simulator = new TeamMatchHttpSimulator(
+                client,
+                this.output,
+                matchId => factory.Services
+                    .GetRequiredService<TeamMatchLobbyService>()
+                    .GetCoordinatorForAudit(matchId));
+            var audit = await simulator.RunAsync(
+                new TeamMatchSimulationScenario(
+                    1,
+                    4,
+                    barometer ? 1 : 0,
+                    barometer,
+                    seed));
+            Assert.True(audit.ExtendedForHanging);
+            Assert.True(audit.Deals[3].Table1Hanging > 0
+                || audit.Deals[3].Table2Hanging > 0);
+            Assert.True(audit.Deals[^1].Table1Hanging == 0
+                && audit.Deals[^1].Table2Hanging == 0);
+        }
+    }
+
+    [Fact]
     public void CoverageCatalogContainsOneHundredThirtySixSupportedCases()
     {
         var supported = TeamMatchSimulationScenario.All;

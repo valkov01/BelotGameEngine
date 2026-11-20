@@ -20,6 +20,8 @@ internal sealed class TeamMatchBotAutomationService : BackgroundService
 
     private readonly TimeSpan idleScan;
 
+    private int pendingWakeupWaits;
+
     public TeamMatchBotAutomationService(
         TeamMatchLobbyService rooms,
         IOptions<TeamMatchAutomationOptions> options,
@@ -45,16 +47,7 @@ internal sealed class TeamMatchBotAutomationService : BackgroundService
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                using var delayCancellation =
-                    CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                var signaled = this.wakeups.Reader.WaitToReadAsync(stoppingToken);
-                var delayed = Task.Delay(this.idleScan, delayCancellation.Token);
-                await Task.WhenAny(signaled.AsTask(), delayed);
-                await delayCancellation.CancelAsync();
-                while (this.wakeups.Reader.TryRead(out _))
-                {
-                }
-
+                await this.WaitForWakeupAsync(stoppingToken);
                 await this.RunCycleAsync(stoppingToken);
             }
         }
@@ -64,6 +57,33 @@ internal sealed class TeamMatchBotAutomationService : BackgroundService
         finally
         {
             this.rooms.AutomationRequested -= this.Signal;
+        }
+    }
+
+    internal int PendingWakeupWaits => Volatile.Read(ref this.pendingWakeupWaits);
+
+    internal async Task WaitForWakeupAsync(CancellationToken cancellationToken)
+    {
+        using var waitCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Interlocked.Increment(ref this.pendingWakeupWaits);
+        var signaled = this.wakeups.Reader
+            .WaitToReadAsync(waitCancellation.Token)
+            .AsTask();
+        var delayed = Task.Delay(this.idleScan, waitCancellation.Token);
+        try
+        {
+            await Task.WhenAny(signaled, delayed);
+            await waitCancellation.CancelAsync();
+            await ObserveCancellationAsync(signaled);
+            await ObserveCancellationAsync(delayed);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref this.pendingWakeupWaits);
+            while (this.wakeups.Reader.TryRead(out _))
+            {
+            }
         }
     }
 
@@ -130,5 +150,16 @@ internal sealed class TeamMatchBotAutomationService : BackgroundService
         }
     }
 
-    private void Signal() => this.wakeups.Writer.TryWrite(true);
+    internal void Signal() => this.wakeups.Writer.TryWrite(true);
+
+    private static async Task ObserveCancellationAsync(Task task)
+    {
+        try
+        {
+            await task;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
 }

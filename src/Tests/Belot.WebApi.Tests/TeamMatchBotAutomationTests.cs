@@ -6,6 +6,8 @@ using Belot.Engine.GameMechanics;
 using Belot.Engine.Players;
 
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 using Xunit;
 
@@ -21,6 +23,35 @@ public sealed class TeamMatchBotAutomationTests
              PlayerPosition.West,
          }
          select (table, seat)).ToArray();
+
+    [Fact]
+    public async Task IdleWakeWaitsAreCanceledObservedAndResponsive()
+    {
+        var service = new TeamMatchBotAutomationService(
+            CreateRooms(),
+            Options.Create(new TeamMatchAutomationOptions
+            {
+                IdleScanMilliseconds = 10,
+            }),
+            NullLogger<TeamMatchBotAutomationService>.Instance);
+
+        for (var scan = 0; scan < 25; scan++)
+        {
+            await service.WaitForWakeupAsync(CancellationToken.None);
+            Assert.Equal(0, service.PendingWakeupWaits);
+        }
+
+        var wakeWait = service.WaitForWakeupAsync(CancellationToken.None);
+        service.Signal();
+        await wakeWait.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.Equal(0, service.PendingWakeupWaits);
+
+        using var shutdown = new CancellationTokenSource();
+        var shutdownWait = service.WaitForWakeupAsync(shutdown.Token);
+        shutdown.Cancel();
+        await shutdownWait.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.Equal(0, service.PendingWakeupWaits);
+    }
 
     [Fact]
     public void CancelledAndStaleBotLeasesDoNotCommitAnAction()
@@ -97,6 +128,50 @@ public sealed class TeamMatchBotAutomationTests
                 .Bids);
         Assert.NotNull(
             rooms.GetPrivateGame(matchId, replacement).Game);
+    }
+
+    [Fact]
+    public void FailingLeaseFromReplacedBotCannotPoisonReplacement()
+    {
+        var failing = new FailingPlayer();
+        var rooms = CreateRooms(profile =>
+            profile == "skilled"
+                ? failing
+                : BotProfiles.Create(profile));
+        var (matchId, host) = StartOneHumanMatch(rooms);
+        var oldLease = Assert.IsType<TeamMatchBotDecisionLease>(
+            rooms.TryAcquireBotDecision());
+        Assert.Throws<InvalidOperationException>(
+            () => oldLease.Player.Decide(oldLease.View));
+
+        var replacement = rooms.AssignReplacementBot(
+            matchId,
+            host,
+            new AssignTeamMatchReplacementBotRequest(
+                oldLease.Table,
+                oldLease.Seat,
+                "random"));
+        Assert.Equal(TeamMatchLobbyStatus.Success, replacement.Status);
+
+        rooms.FailBotDecision(
+            oldLease,
+            maximumRetries: 0,
+            retryDelayMilliseconds: 10);
+
+        var newLease = Assert.IsType<TeamMatchBotDecisionLease>(
+            rooms.TryAcquireBotDecision());
+        Assert.NotEqual(oldLease.LeaseId, newLease.LeaseId);
+        Assert.Equal(oldLease.SeatVersion + 1, newLease.SeatVersion);
+        Assert.Equal("random", newLease.BotProfileId);
+        Assert.Equal(
+            TeamMatchBotCommitResult.Accepted,
+            rooms.TryCommitBotDecision(
+                newLease,
+                newLease.Player.Decide(newLease.View)));
+        Assert.Single(
+            rooms.GetCoordinatorForAudit(matchId)!
+                .GetSeatView(newLease.Table, PlayerPosition.South)
+                .Bids);
     }
 
     [Fact]

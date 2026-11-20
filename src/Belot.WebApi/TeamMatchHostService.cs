@@ -772,18 +772,46 @@ internal sealed partial class TeamMatchLobbyService
         lock (this.gate)
         {
             var room = this.Find(lease.MatchId);
-            if (room != null
-                && (room.BotAutomationLease[lease.Table] == lease.LeaseId
-                    || room.BotAutomationLease[lease.Table] == null))
+            if (room == null
+                || room.BotAutomationLease[lease.Table] != lease.LeaseId)
             {
-                room.BotAutomationLease[lease.Table] = null;
-                this.RecordAutomationFailure(
-                    room,
-                    lease.Table,
-                    maximumRetries,
-                    retryDelayMilliseconds);
+                return;
             }
+
+            room.BotAutomationLease[lease.Table] = null;
+            if (!this.IsCurrentBotDecisionLease(room, lease))
+            {
+                this.ScheduleAssignedBots(room, lease.Table);
+                return;
+            }
+
+            this.RecordAutomationFailure(
+                room,
+                lease.Table,
+                maximumRetries,
+                retryDelayMilliseconds);
         }
+    }
+
+    private bool IsCurrentBotDecisionLease(
+        RoomState room,
+        TeamMatchBotDecisionLease lease)
+    {
+        if (room.Game == null || room.Actions == null || room.Game.IsFinished
+            || TablePaused(room, lease.Table))
+        {
+            return false;
+        }
+
+        var seat = FindSeat(room, lease.Table, lease.Seat)!;
+        var view = room.Game.GetSeatView(lease.Table, lease.Seat);
+        return seat.UserId == null
+            && seat.BotProfileId == lease.BotProfileId
+            && this.GetBotSeatVersion(room, lease.Table, lease.Seat) == lease.SeatVersion
+            && room.Actions.GetTableRevisionForTrustedCoordinator(lease.Table)
+                == lease.ExpectedRevision
+            && view.ToMove == lease.Seat
+            && view.Decision == lease.Decision;
     }
 
     private TeamMatchBotDecisionLease? TryAcquireBotDecision(RoomState room, int table)

@@ -48,9 +48,11 @@ retained events; use the last observed `sequence` to continue. Cursors from one 
 used for the other table.
 
 The action body retains `expectedTableRevision`, `commandId`, and `action`, and accepts optional
-`afterSequence`. If omitted, a successful POST returns the events produced by that accepted
-action and its automatic bot continuation. If supplied, it returns events after that cursor.
-Retries of an accepted `commandId` remain conflicts and do not apply or publish the action again.
+`afterSequence`. A successful POST returns the events available when that accepted action
+commits. Bot decisions are processed asynchronously, so subsequent bot events may not be
+included in that response and clients must continue polling the cursor/snapshot GET. If
+`afterSequence` is supplied, the response returns events available after that cursor. Retries
+of an accepted `commandId` remain conflicts and do not apply or publish the action again.
 
 Both endpoints return the existing seat snapshot fields plus `lastEventSequence`,
 `snapshotRequired`, and `events`. If a cursor is ahead of the journal or its history has expired,
