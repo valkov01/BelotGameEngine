@@ -7,6 +7,7 @@ on:
     branches:
       - a02-multiplayer-foundation
       - feature/a10-team-matches-staging-integration
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       suite:
@@ -23,7 +24,10 @@ permissions:
 
 jobs:
   a10-core:
-    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'smoke-and-regressions'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.suite == 'smoke-and-regressions')
+      || github.event_name == 'push'
+      || (github.event_name == 'pull_request' && github.event.action != 'labeled')
     name: Smoke and regressions
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -62,6 +66,10 @@ jobs:
           if-no-files-found: error
 
   full-matrix:
-    if: github.event_name == 'workflow_dispatch' && inputs.suite == 'full-matrix'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full-matrix')
+      || (github.event_name == 'pull_request'
+          && github.event.action == 'labeled'
+          && github.event.label.name == 'run-team-match-matrix')
     name: Full supported matrix
     uses: ./.github/workflows/a10-team-match-matrix.yml
