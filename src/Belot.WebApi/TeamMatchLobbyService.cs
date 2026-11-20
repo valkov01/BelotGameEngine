@@ -103,12 +103,27 @@ internal sealed partial class TeamMatchLobbyService
 
     private readonly int publicEventCapacity;
 
+    private readonly Func<int, bool, TeamMatchCoreCoordinator> createGame;
+
     public TeamMatchLobbyService(IConfiguration? configuration = null)
+        : this(
+            configuration,
+            (scheduledDeals, barometerEnabled) =>
+                new TeamMatchCoreCoordinator(
+                    scheduledDeals,
+                    barometerEnabled: barometerEnabled))
+    {
+    }
+
+    internal TeamMatchLobbyService(
+        IConfiguration? configuration,
+        Func<int, bool, TeamMatchCoreCoordinator> createGame)
     {
         this.publicEventCapacity = Math.Clamp(
             configuration?.GetValue("TeamMatch:PublicEventsPerTable", 512) ?? 512,
             1,
             4096);
+        this.createGame = createGame ?? throw new ArgumentNullException(nameof(createGame));
     }
 
     private sealed class SeatState
@@ -439,8 +454,7 @@ internal sealed partial class TeamMatchLobbyService
 
             // No public game routes are exposed in A10.3. This prepares the
             // authoritative match and locks the lobby roster for A10.4/A10.5.
-            var game = new TeamMatchCoreCoordinator(
-                match.ScheduledDeals, barometerEnabled: match.BarometerEnabled);
+            var game = this.createGame(match.ScheduledDeals, match.BarometerEnabled);
             var humanSeats = match.Seats
                 .Where(seat => seat.UserId != null)
                 .Select(seat => new TeamMatchHumanSeat(

@@ -4,13 +4,31 @@ on:
   push:
     branches: [a10-team-matches-core]
   pull_request:
-    branches: [a02-multiplayer-foundation]
+    branches:
+      - a02-multiplayer-foundation
+      - feature/a10-team-matches-staging-integration
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Verification suite
+        required: true
+        type: choice
+        default: smoke-and-regressions
+        options:
+          - smoke-and-regressions
+          - full-matrix
 
 permissions:
   contents: read
 
 jobs:
   a10-core:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.suite == 'smoke-and-regressions')
+      || github.event_name == 'push'
+      || (github.event_name == 'pull_request' && github.event.action != 'labeled')
+    name: Smoke and regressions
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -18,11 +36,40 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - name: Engine unit tests
-        run: dotnet test src/Tests/Belot.Engine.Tests/Belot.Engine.Tests.csproj --configuration Release --filter 'FullyQualifiedName~TeamMatchEngineTests'
-      - name: Two-table coordinator and repeated hanging-extension tests
-        run: dotnet test src/Tests/Belot.WebApi.Tests/Belot.WebApi.Tests.csproj --configuration Release --filter 'FullyQualifiedName~TeamMatch'
-      - name: Existing engine regression tests
-        run: dotnet test src/Tests/Belot.Engine.Tests/Belot.Engine.Tests.csproj --configuration Release --no-restore
+      - name: Seven four-deal Team Match smoke scenarios
+        run: >-
+          dotnet test src/Tests/Belot.WebApi.Tests/Belot.WebApi.Tests.csproj
+          --configuration Release
+          --filter "Category=TeamMatchSmoke"
+          --logger "trx;LogFileName=a10-smoke.trx"
+          --results-directory TestResults/A10Smoke
       - name: Existing Web API regression tests
-        run: dotnet test src/Tests/Belot.WebApi.Tests/Belot.WebApi.Tests.csproj --configuration Release --no-restore
+        run: >-
+          dotnet test src/Tests/Belot.WebApi.Tests/Belot.WebApi.Tests.csproj
+          --configuration Release
+          --no-restore
+          --filter "FullyQualifiedName!~TeamMatchAutomatedSimulationTests"
+          --logger "trx;LogFileName=web-api-regression.trx"
+          --results-directory TestResults/WebApi
+      - name: Existing engine regression tests
+        run: >-
+          dotnet test src/Tests/Belot.Engine.Tests/Belot.Engine.Tests.csproj
+          --configuration Release
+          --logger "trx;LogFileName=engine-regression.trx"
+          --results-directory TestResults/Engine
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a10-smoke-and-regression-test-reports
+          path: TestResults/**/*.trx
+          if-no-files-found: error
+
+  full-matrix:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full-matrix')
+      || (github.event_name == 'pull_request'
+          && github.event.action == 'labeled'
+          && github.event.label.name == 'run-team-match-matrix')
+    name: Full supported matrix
+    uses: ./.github/workflows/a10-team-match-matrix.yml
