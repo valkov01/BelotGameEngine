@@ -28,6 +28,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: a10-team-match-119-scenario-report
+          name: a10-team-match-136-scenario-report
           path: TestResults/**/*.trx
           if-no-files-found: error
