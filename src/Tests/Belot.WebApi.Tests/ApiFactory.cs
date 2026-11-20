@@ -16,6 +16,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.Tokens;
 
 public sealed class ApiFactory : WebApplicationFactory<Program>
@@ -62,6 +63,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     private readonly bool hybridRateLimitEnabled;
 
+    private readonly int? teamMatchDeckSeed;
+
     private readonly int hybridIpPermitLimit;
 
     private readonly int hybridReadPermitLimit;
@@ -90,7 +93,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         int hybridReadPermitLimit = 90,
         int hybridMutationPermitLimit = 20,
         int hybridPerUserConcurrencyLimit = 4,
-        int hybridAggregateConcurrencyLimit = 32)
+        int hybridAggregateConcurrencyLimit = 32,
+        int? teamMatchDeckSeed = null)
     {
         this.revealHandsEnabled = revealHandsEnabled;
         this.debugAccessKey = debugAccessKey;
@@ -110,6 +114,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         this.hybridMutationPermitLimit = hybridMutationPermitLimit;
         this.hybridPerUserConcurrencyLimit = hybridPerUserConcurrencyLimit;
         this.hybridAggregateConcurrencyLimit = hybridAggregateConcurrencyLimit;
+        this.teamMatchDeckSeed = teamMatchDeckSeed;
     }
 
     public Action<string>? LobbyLockWaiting { get; set; }
@@ -238,6 +243,19 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             if (this.profileDisplayNameProvider is not null)
             {
                 services.AddSingleton(this.profileDisplayNameProvider);
+            }
+
+            if (this.teamMatchDeckSeed.HasValue)
+            {
+                services.RemoveAll<TeamMatchLobbyService>();
+                services.AddSingleton(provider =>
+                    new TeamMatchLobbyService(
+                        provider.GetRequiredService<IConfiguration>(),
+                        (scheduledDeals, barometerEnabled) =>
+                            new TeamMatchCoreCoordinator(
+                                scheduledDeals,
+                                this.teamMatchDeckSeed.Value,
+                                barometerEnabled: barometerEnabled)));
             }
         });
     }
