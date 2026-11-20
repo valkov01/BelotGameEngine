@@ -7,6 +7,7 @@ on:
     branches:
       - a02-multiplayer-foundation
       - feature/a10-team-matches-staging-integration
+      - feature/a10-6-team-match-test-simulator
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
@@ -36,11 +37,11 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - name: Seven four-deal Team Match smoke scenarios
+      - name: Eight four-deal Team Match smoke scenarios
         run: >-
           dotnet test src/Tests/Belot.WebApi.Tests/Belot.WebApi.Tests.csproj
           --configuration Release
-          --filter "Category=TeamMatchSmoke"
+          --filter "Category=TeamMatchSmoke|Category=TeamMatchFast"
           --logger "trx;LogFileName=a10-smoke.trx"
           --results-directory TestResults/A10Smoke
       - name: Existing Web API regression tests

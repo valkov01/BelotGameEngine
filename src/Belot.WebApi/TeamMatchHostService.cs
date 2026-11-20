@@ -95,6 +95,19 @@ internal sealed partial class TeamMatchLobbyService
         public bool[] BotAutomationPending { get; } = new bool[3];
 
         public bool[] BotAutomationFailed { get; } = new bool[3];
+
+        public long?[] BotAutomationLease { get; } = new long?[3];
+
+        public int[] BotAutomationFailures { get; } = new int[3];
+
+        public DateTimeOffset[] BotAutomationRetryAt { get; } =
+        {
+            DateTimeOffset.MinValue,
+            DateTimeOffset.MinValue,
+            DateTimeOffset.MinValue,
+        };
+
+        public Dictionary<(int Table, PlayerPosition Seat), int> BotSeatVersions { get; } = new();
     }
 
     public TeamMatchHostResult ReportInactive(
@@ -234,7 +247,8 @@ internal sealed partial class TeamMatchLobbyService
             target.BotProfileId = null;
             room.BotPlayers.Remove((request.Table, request.Seat));
             room.ReplacementInvitations.Remove((request.Table, request.Seat));
-            room.BotAutomationPending[request.Table] = false;
+            this.IncrementBotSeatVersion(room, request.Table, request.Seat);
+            this.ScheduleAssignedBots(room, request.Table);
             return new TeamMatchHostResult(
                 TeamMatchLobbyStatus.Success, Lobby: View(room, userId));
         }
@@ -392,7 +406,8 @@ internal sealed partial class TeamMatchLobbyService
             seat.ReservedUserId = null;
             room.BotPlayers.Remove((match.Value.Table, match.Value.Seat));
             room.ReplacementInvitations.Remove(match.Key);
-            this.ContinueAssignedBots(room, match.Value.Table);
+            this.IncrementBotSeatVersion(room, match.Value.Table, match.Value.Seat);
+            this.ScheduleAssignedBots(room, match.Value.Table);
             return new TeamMatchHostResult(
                 TeamMatchLobbyStatus.Success, Lobby: View(room, userId));
         }
@@ -431,9 +446,9 @@ internal sealed partial class TeamMatchLobbyService
             room.ReplacementInvitations.Remove((request.Table, request.Seat));
             seat.ReservedUserId = null;
             seat.BotProfileId = request.BotProfileId.ToLowerInvariant();
-            room.BotPlayers[(request.Table, request.Seat)] = BotProfiles.Create(seat.BotProfileId);
-            // Resume only because the host EXPLICITLY requested a bot.
-            this.ContinueAssignedBots(room, request.Table);
+            room.BotPlayers.Remove((request.Table, request.Seat));
+            this.IncrementBotSeatVersion(room, request.Table, request.Seat);
+            this.ScheduleAssignedBots(room, request.Table);
             return new TeamMatchHostResult(
                 TeamMatchLobbyStatus.Success, Lobby: View(room, userId));
         }
@@ -588,8 +603,8 @@ internal sealed partial class TeamMatchLobbyService
                     : ConflictHost($"Action not accepted: {submitted.Status}.");
             }
 
-            this.ContinueAssignedBots(room, seat.Table);
-            this.ContinueAssignedBots(room, seat.Table == 1 ? 2 : 1);
+            this.ScheduleAssignedBots(room, seat.Table);
+            this.ScheduleAssignedBots(room, seat.Table == 1 ? 2 : 1);
             var response = this.GetPrivateGame(matchId, userId, afterSequence);
             if (requestedReplay?.SnapshotRequired != true || response.Game == null)
             {
@@ -633,71 +648,251 @@ internal sealed partial class TeamMatchLobbyService
                 return ConflictHost("This table is paused for a replacement, not pending bot automation.");
             }
 
-            this.ContinueAssignedBots(room, table);
+            this.ResetAutomationFailure(room, table);
+            this.ScheduleAssignedBots(room, table);
             return new TeamMatchHostResult(TeamMatchLobbyStatus.Success);
         }
     }
 
-    private void ContinueAssignedBots(RoomState room, int table)
+    internal TeamMatchBotDecisionLease? TryAcquireBotDecision()
     {
-        if (room.Game == null || room.Actions == null || TablePaused(room, table))
+        lock (this.gate)
         {
+            var rooms = this.rooms.Values.ToArray();
+            var candidateCount = rooms.Length * 2;
+            if (candidateCount == 0)
+            {
+                return null;
+            }
+
+            for (var offset = 0; offset < candidateCount; offset++)
+            {
+                var candidate = (this.automationScanCursor + offset) % candidateCount;
+                var room = rooms[candidate / 2];
+                var table = candidate % 2 + 1;
+                var lease = this.TryAcquireBotDecision(room, table);
+                if (lease != null)
+                {
+                    this.automationScanCursor = (candidate + 1) % candidateCount;
+                    return lease;
+                }
+            }
+
+            this.automationScanCursor = 0;
+            return null;
+        }
+    }
+
+    internal TeamMatchBotCommitResult TryCommitBotDecision(
+        TeamMatchBotDecisionLease lease,
+        BelotAction action,
+        CancellationToken cancellationToken = default)
+    {
+        lock (this.gate)
+        {
+            var room = this.Find(lease.MatchId);
+            if (room == null || room.BotAutomationLease[lease.Table] != lease.LeaseId)
+            {
+                return TeamMatchBotCommitResult.Stale;
+            }
+
+            room.BotAutomationLease[lease.Table] = null;
+            if (cancellationToken.IsCancellationRequested)
+            {
+                room.BotAutomationPending[lease.Table] = true;
+                return TeamMatchBotCommitResult.Cancelled;
+            }
+
+            if (room.Game == null || room.Actions == null || room.Game.IsFinished
+                || TablePaused(room, lease.Table))
+            {
+                room.BotAutomationPending[lease.Table] = false;
+                return TeamMatchBotCommitResult.Stale;
+            }
+
+            var seat = FindSeat(room, lease.Table, lease.Seat)!;
+            var view = room.Game.GetSeatView(lease.Table, lease.Seat);
+            if (seat.UserId != null || seat.BotProfileId != lease.BotProfileId
+                || this.GetBotSeatVersion(room, lease.Table, lease.Seat) != lease.SeatVersion
+                || view.ToMove != lease.Seat || view.Decision != lease.Decision)
+            {
+                room.BotAutomationPending[lease.Table] = true;
+                this.SignalAutomation();
+                return TeamMatchBotCommitResult.Stale;
+            }
+
+            var submitted = room.Actions.SubmitBotForTrustedCoordinator(
+                lease.Table,
+                lease.Seat,
+                lease.ExpectedRevision,
+                action);
+            if (submitted.Status == TeamMatchSeatActionStatus.StaleRevision)
+            {
+                room.BotAutomationPending[lease.Table] = true;
+                this.SignalAutomation();
+                return TeamMatchBotCommitResult.Stale;
+            }
+
+            if (submitted.Status != TeamMatchSeatActionStatus.Accepted)
+            {
+                room.BotAutomationPending[lease.Table] = true;
+                room.BotAutomationFailed[lease.Table] = true;
+                room.BotAutomationRetryAt[lease.Table] = DateTimeOffset.MaxValue;
+                return TeamMatchBotCommitResult.Failed;
+            }
+
+            room.BotAutomationFailures[lease.Table] = 0;
+            room.BotAutomationFailed[lease.Table] = false;
+            room.BotAutomationRetryAt[lease.Table] = DateTimeOffset.MinValue;
+            this.ScheduleAssignedBots(room, 1);
+            this.ScheduleAssignedBots(room, 2);
+            return TeamMatchBotCommitResult.Accepted;
+        }
+    }
+
+    internal void CancelBotDecision(TeamMatchBotDecisionLease lease)
+    {
+        lock (this.gate)
+        {
+            var room = this.Find(lease.MatchId);
+            if (room != null
+                && room.BotAutomationLease[lease.Table] == lease.LeaseId)
+            {
+                room.BotAutomationLease[lease.Table] = null;
+                room.BotAutomationPending[lease.Table] = true;
+            }
+        }
+    }
+
+    internal void FailBotDecision(
+        TeamMatchBotDecisionLease lease,
+        int maximumRetries,
+        int retryDelayMilliseconds)
+    {
+        lock (this.gate)
+        {
+            var room = this.Find(lease.MatchId);
+            if (room != null
+                && (room.BotAutomationLease[lease.Table] == lease.LeaseId
+                    || room.BotAutomationLease[lease.Table] == null))
+            {
+                room.BotAutomationLease[lease.Table] = null;
+                this.RecordAutomationFailure(
+                    room,
+                    lease.Table,
+                    maximumRetries,
+                    retryDelayMilliseconds);
+            }
+        }
+    }
+
+    private TeamMatchBotDecisionLease? TryAcquireBotDecision(RoomState room, int table)
+    {
+        if (room.Game == null || room.Actions == null || room.Game.IsFinished
+            || TablePaused(room, table) || !room.BotAutomationPending[table]
+            || room.BotAutomationLease[table] != null
+            || DateTimeOffset.UtcNow < room.BotAutomationRetryAt[table]
+            || room.BotAutomationFailed[table])
+        {
+            return null;
+        }
+
+        if (room.Game.IsAwaitingSharedBoundary(table))
+        {
+            room.BotAutomationPending[table] = false;
+            return null;
+        }
+
+        var publicView = room.Game.GetSeatView(table, PlayerPosition.South);
+        if (publicView.ToMove is not (PlayerPosition.South or PlayerPosition.East
+            or PlayerPosition.North or PlayerPosition.West))
+        {
+            room.BotAutomationPending[table] = false;
+            return null;
+        }
+
+        var botSeat = FindSeat(room, table, publicView.ToMove)!;
+        if (botSeat.BotProfileId == null || botSeat.UserId != null)
+        {
+            room.BotAutomationPending[table] = false;
+            return null;
+        }
+
+        var key = (table, publicView.ToMove);
+        if (!room.BotPlayers.TryGetValue(key, out var player))
+        {
+            player = this.createBot(botSeat.BotProfileId);
+            room.BotPlayers.Add(key, player);
+        }
+
+        var leaseId = ++this.nextAutomationLease;
+        room.BotAutomationLease[table] = leaseId;
+        return new TeamMatchBotDecisionLease(
+            room.Id,
+            table,
+            publicView.ToMove,
+            publicView.Decision,
+            botSeat.BotProfileId,
+            this.GetBotSeatVersion(room, table, publicView.ToMove),
+            room.Actions.GetTableRevisionForTrustedCoordinator(table),
+            leaseId,
+            player,
+            room.Game.GetSeatView(table, publicView.ToMove));
+    }
+
+    private void ScheduleAssignedBots(RoomState room, int table)
+    {
+        if (room.Game == null || room.Actions == null || room.Game.IsFinished
+            || TablePaused(room, table) || room.BotAutomationFailed[table]
+            || room.Game.IsAwaitingSharedBoundary(table))
+        {
+            room.BotAutomationPending[table] = false;
             return;
         }
 
-        // Bounded continuation, following the existing multiplayer engine's
-        // human-action-triggered automation pattern. A completely human-free
-        // table requiring persistent independent scheduling is LAST A10.7 #37.
-        const int maximumActions = 96;
+        room.BotAutomationPending[table] = true;
+        this.SignalAutomation();
+    }
+
+    private void ResetAutomationFailure(RoomState room, int table)
+    {
         room.BotAutomationFailed[table] = false;
-        var actions = 0;
-        while (!room.Game.IsFinished && !TablePaused(room, table)
-            && actions++ < maximumActions)
+        room.BotAutomationFailures[table] = 0;
+        room.BotAutomationRetryAt[table] = DateTimeOffset.MinValue;
+    }
+
+    private void RecordAutomationFailure(
+        RoomState room,
+        int table,
+        int maximumRetries,
+        int retryDelayMilliseconds)
+    {
+        room.BotAutomationFailures[table]++;
+        room.BotAutomationPending[table] = true;
+        if (room.BotAutomationFailures[table] > maximumRetries)
         {
-            var view = room.Game.GetSeatView(table, PlayerPosition.South);
-            if (view.ToMove is not (PlayerPosition.South or PlayerPosition.East
-                or PlayerPosition.North or PlayerPosition.West))
-            {
-                room.BotAutomationPending[table] = false;
-                return;
-            }
-
-            var botSeat = FindSeat(room, table, view.ToMove)!;
-            if (botSeat.BotProfileId == null || botSeat.UserId != null)
-            {
-                room.BotAutomationPending[table] = false;
-                return;
-            }
-
-            try
-            {
-                var key = (table, view.ToMove);
-                if (!room.BotPlayers.TryGetValue(key, out var player))
-                {
-                    player = BotProfiles.Create(botSeat.BotProfileId);
-                    room.BotPlayers.Add(key, player);
-                }
-
-                var move = player.Decide(room.Game.GetSeatView(table, view.ToMove));
-                if (room.Actions.SubmitBotForTrustedCoordinator(table, view.ToMove, move)
-                    != BelotActResult.Ok)
-                {
-                    room.BotAutomationFailed[table] = true;
-                    room.BotAutomationPending[table] = true;
-                    return;
-                }
-            }
-            catch (Exception)
-            {
-                // Never roll back an already accepted human action or fake a bot
-                // move on failure. Leave a resumable pending state to retry safely.
-                room.BotAutomationFailed[table] = true;
-                room.BotAutomationPending[table] = true;
-                return;
-            }
+            room.BotAutomationFailed[table] = true;
+            room.BotAutomationRetryAt[table] = DateTimeOffset.MaxValue;
+            return;
         }
 
-        room.BotAutomationPending[table] = !room.Game.IsFinished;
+        var multiplier = room.BotAutomationFailures[table];
+        room.BotAutomationRetryAt[table] = DateTimeOffset.UtcNow.AddMilliseconds(
+            checked(retryDelayMilliseconds * multiplier));
+        this.SignalAutomation();
+    }
+
+    private int GetBotSeatVersion(RoomState room, int table, PlayerPosition seat) =>
+        room.BotSeatVersions.TryGetValue((table, seat), out var version) ? version : 0;
+
+    private void IncrementBotSeatVersion(RoomState room, int table, PlayerPosition seat) =>
+        room.BotSeatVersions[(table, seat)] =
+            this.GetBotSeatVersion(room, table, seat) + 1;
+
+    private void SignalAutomation()
+    {
+        var requested = this.AutomationRequested;
+        requested?.Invoke();
     }
 
     private static bool TablePaused(RoomState room, int table) =>

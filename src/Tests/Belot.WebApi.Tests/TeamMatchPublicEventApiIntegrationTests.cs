@@ -68,23 +68,30 @@ public sealed class TeamMatchPublicEventApiIntegrationTests : IDisposable
         Assert.DoesNotContain(fixture.Host, eventsJson, StringComparison.Ordinal);
         Assert.DoesNotContain(fixture.Guest, eventsJson, StringComparison.Ordinal);
 
+        var settled = await this.WaitForHumanTurnAsync(fixture, accepted);
         using var continuation = await this.SendAsync(
             HttpMethod.Get,
             fixture.Root + "/game?afterSequence=" + accepted.LastEventSequence,
             fixture.Guest);
         var continued = (await continuation.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
-        Assert.Empty(continued.Events);
         Assert.False(continued.SnapshotRequired);
-        Assert.Equal(accepted.LastEventSequence, continued.LastEventSequence);
+        Assert.NotEmpty(continued.Events);
+        Assert.All(
+            continued.Events,
+            gameEvent => Assert.True(gameEvent.Sequence > accepted.LastEventSequence));
+        Assert.Equal(
+            Enumerable.Range(continued.Events[0].Sequence, continued.Events.Count),
+            continued.Events.Select(gameEvent => gameEvent.Sequence));
+        Assert.Equal(settled.LastEventSequence, continued.LastEventSequence);
 
         using var futureCursor = await this.SendAsync(
             HttpMethod.Get,
-            fixture.Root + "/game?afterSequence=" + (accepted.LastEventSequence + 1),
+            fixture.Root + "/game?afterSequence=" + (settled.LastEventSequence + 1),
             fixture.Guest);
         var recovered = (await futureCursor.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
         Assert.True(recovered.SnapshotRequired);
         Assert.Empty(recovered.Events);
-        Assert.Equal(accepted.State.RoundNumber, recovered.State.RoundNumber);
+        Assert.Equal(settled.State.RoundNumber, recovered.State.RoundNumber);
 
         using var duplicate = await this.SendAsync(
             HttpMethod.Post,
@@ -94,10 +101,10 @@ public sealed class TeamMatchPublicEventApiIntegrationTests : IDisposable
         Assert.Equal(HttpStatusCode.Conflict, duplicate.StatusCode);
         using var afterDuplicate = await this.SendAsync(
             HttpMethod.Get,
-            fixture.Root + "/game?afterSequence=" + accepted.LastEventSequence,
+            fixture.Root + "/game?afterSequence=" + settled.LastEventSequence,
             fixture.Guest);
         var unchanged = (await afterDuplicate.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
-        Assert.Equal(accepted.LastEventSequence, unchanged.LastEventSequence);
+        Assert.Equal(settled.LastEventSequence, unchanged.LastEventSequence);
         Assert.Empty(unchanged.Events);
     }
 
@@ -125,11 +132,19 @@ public sealed class TeamMatchPublicEventApiIntegrationTests : IDisposable
                 -1),
             limitedClient);
         Assert.Equal(HttpStatusCode.OK, actionResponse.StatusCode);
-        var recovery = (await actionResponse.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
+        var accepted = (await actionResponse.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
+        await this.WaitForHumanTurnAsync(fixture, accepted, limitedClient);
+        using var expired = await this.SendAsync(
+            HttpMethod.Get,
+            fixture.Root + "/game?afterSequence=-1",
+            fixture.Guest,
+            client: limitedClient);
+        var recovery = (await expired.Content
+            .ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
         Assert.True(recovery.LastEventSequence > 1);
         Assert.True(recovery.SnapshotRequired);
         Assert.Empty(recovery.Events);
-        Assert.True(recovery.State.Hand.Count == 5);
+        Assert.InRange(recovery.State.Hand.Count, 1, 8);
 
         using var snapshotResponse = await this.SendAsync(
             HttpMethod.Get,
@@ -176,14 +191,15 @@ public sealed class TeamMatchPublicEventApiIntegrationTests : IDisposable
         Assert.Empty(recovery.Events);
         Assert.True(recovery.LastEventSequence >= 0);
 
+        var settled = await this.WaitForHumanTurnAsync(fixture, recovery);
         using var snapshotResponse = await this.SendAsync(
             HttpMethod.Get,
             fixture.Root + "/game",
             fixture.Guest);
         var snapshot = (await snapshotResponse.Content.ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
-        Assert.Equal(recovery.LastEventSequence, snapshot.LastEventSequence);
-        Assert.Equal(recovery.State.RoundNumber, snapshot.State.RoundNumber);
-        Assert.Equal(recovery.State.Hand, snapshot.State.Hand);
+        Assert.Equal(settled.LastEventSequence, snapshot.LastEventSequence);
+        Assert.Equal(settled.State.RoundNumber, snapshot.State.RoundNumber);
+        Assert.Equal(settled.State.Hand, snapshot.State.Hand);
     }
 
     [Fact]
@@ -452,5 +468,33 @@ public sealed class TeamMatchPublicEventApiIntegrationTests : IDisposable
         }
 
         return await (client ?? this.client).SendAsync(request);
+    }
+
+    private async Task<TeamMatchGameSnapshotDto> WaitForHumanTurnAsync(
+        (string Host, string Guest, string Root) fixture,
+        TeamMatchGameSnapshotDto initial,
+        HttpClient? client = null)
+    {
+        var state = initial;
+        for (var wait = 0;
+             wait < 500
+             && !state.State.IsFinished
+             && (state.State.ToMove != PlayerPosition.South.ToString()
+                 || state.AutomationPending);
+             wait++)
+        {
+            await Task.Delay(10);
+            using var response = await this.SendAsync(
+                HttpMethod.Get,
+                fixture.Root + "/game",
+                fixture.Guest,
+                client: client);
+            state = (await response.Content
+                .ReadFromJsonAsync<TeamMatchGameSnapshotDto>(JsonOptions))!;
+        }
+
+        Assert.False(state.AutomationPending);
+        Assert.Equal(PlayerPosition.South.ToString(), state.State.ToMove);
+        return state;
     }
 }

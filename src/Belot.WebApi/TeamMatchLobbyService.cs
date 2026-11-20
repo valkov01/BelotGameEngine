@@ -5,6 +5,8 @@ using System.Text;
 
 using Microsoft.Extensions.Configuration;
 
+using Belot.Engine.Game;
+using Belot.Engine.GameMechanics;
 using Belot.Engine.Players;
 
 /// <summary>Only a private, unlisted two-table match is supported in A10.3.</summary>
@@ -69,6 +71,26 @@ public sealed record CreateTeamMatchResponse(TeamMatchLobbyDto Lobby, string Inv
 
 public sealed record RotateTeamMatchInviteResponse(string InvitationCode);
 
+internal enum TeamMatchBotCommitResult
+{
+    Accepted,
+    Stale,
+    Cancelled,
+    Failed,
+}
+
+internal sealed record TeamMatchBotDecisionLease(
+    string MatchId,
+    int Table,
+    PlayerPosition Seat,
+    BelotDecision Decision,
+    string BotProfileId,
+    int SeatVersion,
+    long ExpectedRevision,
+    long LeaseId,
+    IPlayer Player,
+    BelotSeatView View);
+
 internal enum TeamMatchLobbyStatus
 {
     Success,
@@ -105,25 +127,44 @@ internal sealed partial class TeamMatchLobbyService
 
     private readonly Func<int, bool, TeamMatchCoreCoordinator> createGame;
 
+    private readonly Func<string, IPlayer> createBot;
+
+    private readonly int maximumActiveMatches;
+
+    private int automationScanCursor;
+
+    private long nextAutomationLease;
+
+    internal event Action? AutomationRequested;
+
     public TeamMatchLobbyService(IConfiguration? configuration = null)
         : this(
             configuration,
             (scheduledDeals, barometerEnabled) =>
                 new TeamMatchCoreCoordinator(
                     scheduledDeals,
-                    barometerEnabled: barometerEnabled))
+                    barometerEnabled: barometerEnabled),
+            BotProfiles.Create)
     {
     }
 
     internal TeamMatchLobbyService(
         IConfiguration? configuration,
-        Func<int, bool, TeamMatchCoreCoordinator> createGame)
+        Func<int, bool, TeamMatchCoreCoordinator> createGame,
+        Func<string, IPlayer>? createBot = null)
     {
         this.publicEventCapacity = Math.Clamp(
             configuration?.GetValue("TeamMatch:PublicEventsPerTable", 512) ?? 512,
             1,
             4096);
+        this.maximumActiveMatches = Math.Clamp(
+            configuration?.GetValue(
+                "TeamMatch:Automation:MaximumActiveMatches",
+                20) ?? 20,
+            1,
+            1000);
         this.createGame = createGame ?? throw new ArgumentNullException(nameof(createGame));
+        this.createBot = createBot ?? BotProfiles.Create;
     }
 
     private sealed class SeatState
@@ -445,11 +486,11 @@ internal sealed partial class TeamMatchLobbyService
                 return Conflict("All eight seats need a human or a bot before starting.");
             }
 
-            // Explicitly temporary, until autonomous 4-bot-table A10.7 (#37).
-            if (new[] { 1, 2 }.Any(table => !match.Seats.Any(
-                    seat => seat.Table == table && seat.UserId != null)))
+            if (this.rooms.Values.Count(room =>
+                    room.Game != null && !room.Game.IsFinished)
+                >= this.maximumActiveMatches)
             {
-                return Conflict("A human is required at each table until autonomous all-bot tables are implemented.");
+                return Conflict("The server's active Team Match capacity is full. Try again after a match completes.");
             }
 
             // No public game routes are exposed in A10.3. This prepares the
@@ -462,8 +503,8 @@ internal sealed partial class TeamMatchLobbyService
                 .ToArray();
             match.Actions = new TeamMatchSeatActionBoundary(game, humanSeats, this.publicEventCapacity);
             match.Game = game;
-            this.ContinueAssignedBots(match, 1);
-            this.ContinueAssignedBots(match, 2);
+            this.ScheduleAssignedBots(match, 1);
+            this.ScheduleAssignedBots(match, 2);
             return new TeamMatchLobbyResult(TeamMatchLobbyStatus.Success, View(match, callerUserId));
         }
     }
@@ -481,6 +522,14 @@ internal sealed partial class TeamMatchLobbyService
                 : match.Seats
                     .Where(seat => seat.UserId != null)
                     .ToDictionary(seat => (seat.Table, seat.Position), seat => seat.UserId!);
+        }
+    }
+
+    internal TeamMatchCoreCoordinator? GetCoordinatorForAudit(string matchId)
+    {
+        lock (this.gate)
+        {
+            return this.Find(matchId)?.Game;
         }
     }
 

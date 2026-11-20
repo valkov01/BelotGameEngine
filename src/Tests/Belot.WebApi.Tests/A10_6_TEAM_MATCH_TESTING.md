@@ -24,8 +24,9 @@ deals. Hanging points can extend the actual deal count.
 Recorded run on 2026-11-20:
 
 - 119 / 119 supported configuration/deal-count matches passed.
-- 17 / 17 unsupported one-human/seven-bot starts were explicitly rejected for
-  deal counts 4-20.
+-   The 17 one-human/seven-bot cases for deal counts 4-20 remain cataloged for A10.7.
+  They are activated on the A10.7 feature branch as complete autonomous HTTP matches,
+  bringing the supported total to 136 scenarios.
 - 142 / 142 simulator tests passed with no skips.
 - Every HTTP response was checked for an unexpected `429`.
 - The 119 full matches took 5m29s of accumulated per-match time in a 5m35s run.
@@ -97,6 +98,18 @@ dotnet test src/Tests/Belot.WebApi.Tests/Belot.WebApi.Tests.csproj \
 dotnet test src/Tests/Belot.Engine.Tests/Belot.Engine.Tests.csproj
 ```
 
+## A10.7 autonomous activation
+
+The A10.7 implementation lets the organizer be the only human. The four-bot table
+is driven by the server-hosted bounded pump, while the simulator submits actions
+only from the organizer's authenticated table seat. It uses the organizer and
+results endpoints to observe the bot-only table and a test-only internal audit
+handle to compare the completed hidden round records after true match completion.
+
+The existing 17 one-human scenarios now use the normal `RunAsync` path. The matrix
+workflow selects `TeamMatchSmoke`, `TeamMatchBoundary`, `TeamMatchMatrix` and
+`TeamMatchAutonomous`, for 136 complete supported matches.
+
 ## CI recommendation
 
 Keep the four-deal smoke category in normal CI. Run the complete matrix in a
@@ -106,9 +119,8 @@ per-change A10 validation and nightly coverage.
 
 ## Deferred and unverified scope
 
-- A table with no human remains explicitly unsupported. The 17 future
-  one-human/seven-bot scenarios are represented in the parameter catalog and
-  currently assert the rejection.
+- Autonomous processing and event/revision state remain process-local. The tests
+  do not prove Render Free CPU capacity or restart recovery.
 - These tests use the production authentication policies with test JWTs and
   the in-process test server. They do not prove deployed JWT, CORS, rate-limit,
   process-restart or Render configuration.

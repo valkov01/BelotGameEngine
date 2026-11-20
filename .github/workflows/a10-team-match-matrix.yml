@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   matrix:
-    name: Supported 119-scenario matrix
+    name: Supported 136-scenario matrix
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -21,7 +21,7 @@ jobs:
         run: >-
           dotnet test src/Tests/Belot.WebApi.Tests/Belot.WebApi.Tests.csproj
           --configuration Release
-          --filter "Category=TeamMatchSmoke|Category=TeamMatchBoundary|Category=TeamMatchMatrix"
+          --filter "Category=TeamMatchSmoke|Category=TeamMatchBoundary|Category=TeamMatchMatrix|Category=TeamMatchAutonomous"
           --logger "trx;LogFileName=a10-full-matrix.trx"
           --results-directory TestResults/A10Matrix
       - name: Upload full matrix report

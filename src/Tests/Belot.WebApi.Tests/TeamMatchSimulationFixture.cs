@@ -1,5 +1,7 @@
 ﻿namespace Belot.WebApi.Tests;
 
+using Microsoft.Extensions.DependencyInjection;
+
 public sealed class TeamMatchSimulationFixture : IDisposable
 {
     public TeamMatchSimulationFixture()
@@ -17,4 +19,8 @@ public sealed class TeamMatchSimulationFixture : IDisposable
         this.Client.Dispose();
         this.Factory.Dispose();
     }
+
+    internal TeamMatchCoreCoordinator? GetCoordinator(string matchId) =>
+        this.Factory.Services.GetRequiredService<TeamMatchLobbyService>()
+            .GetCoordinatorForAudit(matchId);
 }

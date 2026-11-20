@@ -136,6 +136,31 @@ History is bounded per table to 512 events by default. `TeamMatch:PublicEventsPe
 configured from 1 to 4096; changing retention affects only how far back clients can replay, not
 the current game state.
 
+### Autonomous Team Match tables
+
+A Team Match can start with one authenticated organizer and seven assigned bots. If either
+table has four bots, the server's single hosted automation pump advances that table without a
+client action or browser bot engine. Bot work is serialized with human actions, revisions and
+seat ownership; the worker calculates one decision from a seat-scoped view outside the state
+locks and commits only while the captured turn, profile, seat version and revision still match.
+
+The bounded defaults are explicit under `TeamMatch:Automation`:
+
+| Setting | Default | Purpose |
+| --- | ---: | --- |
+| `MaximumActiveMatches` | 20 | Rejects additional starts while this many process-local matches are active. |
+| `WakeupQueueCapacity` | 64 | Bounds/coalesces automation wake signals; periodic scanning recovers dropped signals. |
+| `ActionsPerCycle` | 8 | Maximum decisions processed before the worker yields. |
+| `IdleScanMilliseconds` | 250 | Lost-wakeup guard and retry interval scan. |
+| `InterActionDelayMilliseconds` | 1 | Yields request-service capacity between accepted bot decisions. |
+| `MaximumDecisionRetries` | 3 | Failed decisions before the table requires explicit resume. |
+| `RetryDelayMilliseconds` | 250 | Initial retry delay, increased for subsequent retries. |
+
+These are server-resource controls, not game rules. Invalid values fail startup rather than
+silently changing bounds. A cancellation between bot calculation and commit discards the
+uncommitted decision; an accepted action and its revision/events remain committed together.
+The `/game/bots/resume` mutation remains authenticated and only reschedules pending automation.
+
 ### Example requests
 
 ```sh
@@ -338,5 +363,7 @@ The image uses the .NET 10 SDK to publish and the .NET 10 ASP.NET runtime to ser
 `0.0.0.0:10000`, the Render web-service port. On Render, create a Docker web service from this
 repository and use the root `Dockerfile`. The service stores games only in process memory;
 **all active games are lost when the service restarts or a Render Free instance sleeps/restarts**.
-Use a persistent/shared store before scaling to multiple instances or requiring games to survive
+Autonomous Team Match processing does not add persistence or a separate worker. Do not treat
+the capacity defaults as Render Free capacity proof. Use a persistent/shared store and
+single-writer coordination before scaling to multiple instances or requiring games to survive
 restarts.

@@ -4,6 +4,8 @@ using Belot.Engine.Game;
 using Belot.Engine.GameMechanics;
 using Belot.Engine.Players;
 
+using Microsoft.Extensions.DependencyInjection;
+
 using Xunit;
 using Xunit.Abstractions;
 
@@ -19,7 +21,10 @@ public sealed class TeamMatchAutomatedSimulationTests
         ITestOutputHelper output)
     {
         this.output = output;
-        this.simulator = new TeamMatchHttpSimulator(fixture.Client, output);
+        this.simulator = new TeamMatchHttpSimulator(
+            fixture.Client,
+            output,
+            fixture.GetCoordinator);
     }
 
     [Theory]
@@ -61,14 +66,26 @@ public sealed class TeamMatchAutomatedSimulationTests
     }
 
     [Theory]
-    [Trait("Category", "TeamMatchUnsupported")]
+    [Trait("Category", "TeamMatchAutonomous")]
     [MemberData(
-        nameof(TeamMatchSimulationScenario.DeferredAllBotTables),
+        nameof(TeamMatchSimulationScenario.AutonomousAllBotTables),
         MemberType = typeof(TeamMatchSimulationScenario))]
-    public async Task OneHumanRejectsCurrentAllBotTableStartAtEveryDealCount(
+    public async Task OneHumanCompletesAutonomousFourBotTableAtEveryDealCount(
         TeamMatchSimulationScenario scenario)
     {
-        await this.simulator.AssertUnsupportedAllBotTableAsync(scenario);
+        var audit = await this.simulator.RunAsync(scenario);
+        Assert.True(audit.ActualDeals >= scenario.ScheduledDeals);
+    }
+
+    [Fact]
+    [Trait("Category", "TeamMatchFast")]
+    public async Task OneHumanFourDealAutonomousMatchIsFastSmokeCandidate()
+    {
+        var scenario = TeamMatchSimulationScenario.AutonomousAllBotTables
+            .Select(row => Assert.IsType<TeamMatchSimulationScenario>(Assert.Single(row)))
+            .Single(candidate => candidate.ScheduledDeals == 4);
+        var audit = await this.simulator.RunAsync(scenario);
+        Assert.True(audit.ActualDeals >= scenario.ScheduledDeals);
     }
 
     [Fact]
@@ -80,7 +97,12 @@ public sealed class TeamMatchAutomatedSimulationTests
         {
             using var factory = new ApiFactory(teamMatchDeckSeed: seed);
             using var client = factory.CreateClient();
-            var simulator = new TeamMatchHttpSimulator(client, this.output);
+            var simulator = new TeamMatchHttpSimulator(
+                client,
+                this.output,
+                matchId => factory.Services
+                    .GetRequiredService<TeamMatchLobbyService>()
+                    .GetCoordinatorForAudit(matchId));
             var audit = await simulator.RunAsync(
                 new TeamMatchSimulationScenario(8, 4, barometer ? 1 : 0, barometer, seed));
             Assert.True(audit.ExtendedForHanging);
@@ -93,7 +115,7 @@ public sealed class TeamMatchAutomatedSimulationTests
     }
 
     [Fact]
-    public void CoverageCatalogContainsOneHundredNineteenSupportedAndSeventeenDeferredCases()
+    public void CoverageCatalogContainsOneHundredThirtySixSupportedCases()
     {
         var supported = TeamMatchSimulationScenario.All;
         Assert.Equal(119, supported.Count);
@@ -114,7 +136,12 @@ public sealed class TeamMatchAutomatedSimulationTests
                 scenario.HumanSeats().Distinct().Count());
         });
 
-        Assert.Equal(17, TeamMatchSimulationScenario.DeferredAllBotTables.Count());
+        var autonomous = TeamMatchSimulationScenario.AutonomousAllBotTables
+            .Select(row => Assert.IsType<TeamMatchSimulationScenario>(Assert.Single(row)))
+            .ToArray();
+        Assert.Equal(17, autonomous.Length);
+        Assert.All(autonomous, scenario => Assert.Equal(1, scenario.HumanCount));
+        Assert.Equal(136, supported.Count + autonomous.Length);
     }
 
     [Theory]
